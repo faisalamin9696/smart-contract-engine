@@ -1,0 +1,3 @@
+# Shell scripts must stay LF: they are executed by `sh` inside Linux containers,
+# and a CRLF line ending makes the interpreter choke on the carriage return.
+*.sh text eol=lf

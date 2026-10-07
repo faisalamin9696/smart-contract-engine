@@ -1,0 +1,180 @@
+// SteemCraft L2 NFT Engine — persistence schema.
+//
+// Design notes:
+//  * Every *mutable* state entity (collections/instances/accounts/orders/meta) has a typed
+//    table so the read APIs can use real indexes (owner, status, symbol) instead of JSON scans.
+//  * `undo_journal` holds the before-images captured while applying a block; together with
+//    `blocks` it is what makes micro-fork rollback exact and replayable.
+//  * Block header times and entity timestamps are stored as plain strings to guarantee
+//    byte-for-byte fidelity with the values produced by the deterministic VM (a DateTime
+//    round-trip would normalise them and break state comparisons).
+//  * `blocks.height` is the ingestion cursor; the advisory lock used to serialise block
+//    processing is taken at transaction start (see PrismaStateStore.acquireIndexLock).
+
+generator client {
+  provider = "prisma-client-js"
+  // Ship every query engine the runtime could possibly detect: the build platform
+  // (3.0.x) plus 1.1.x, which is what Prisma assumes when a slim image is missing the
+  // openssl CLI or the database actually runs on an older distro. Cheap insurance —
+  // a missing engine hard-crashes the engine at boot.
+  binaryTargets = ["native", "debian-openssl-3.0.x", "debian-openssl-1.1.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model BlockRecord {
+  height    Int               @id
+  blockId   String            @unique
+  previous  String
+  timestamp String
+  txCount   Int
+  opCount   Int
+  /// Host clock (ISO) — explicitly excluded from deterministic state.
+  appliedAt String
+
+  journal JournalEntry[]
+}
+
+/// Rolling undo buffer: before-images of every mutation performed at `height`.
+model JournalEntry {
+  height Int
+  seq    Int
+  /// Entity partition: collection | instance | account | order | meta
+  entity String
+  key    String
+  /// SQL NULL means "the key did not exist before this mutation".
+  before Json?
+
+  block BlockRecord @relation(fields: [height], references: [height], onDelete: Cascade)
+
+  @@id([height, seq])
+  @@index([height, entity])
+}
+
+model CollectionRecord {
+  symbol    String  @id
+  /// Friendly name (wiki: letters/numbers/whitespace, <= 50)
+  name      String
+  /// Steem account that owns the NFT (wiki `issuer`)
+  issuer    String
+  /// Project URL (wiki `updateUrl`), <= 255 chars
+  url       String
+  /// Company/organization (wiki `updateOrgName`), <= 50 chars
+  orgName   String
+  /// Product/brand (wiki `updateProductName`), <= 50 chars
+  productName String
+  /// "0" = unlimited (wiki: omitted maxSupply)
+  maxSupply String
+  /// Tokens ever issued (wiki `supply`) — the id sequence, never decreases
+  supply    String
+  /// Tokens issued then destroyed (ids are never recycled: id = supply + 1 at issue)
+  burned    String
+  /// supply - burned (wiki `circulatingSupply`)
+  circulatingSupply String
+  /// Accounts allowed to issue on behalf of the owner (max 10)
+  authorizedIssuingAccounts String[]
+  /// Smart contracts allowed to issue (max 10; this engine has no contract accounts)
+  authorizedIssuingContracts String[]
+  /// Declared data-property schemas (wiki `addProperty`), keyed by property name
+  properties Json
+  /// Market grouping (wiki `setGroupBy`) — set once; empty = not yet set
+  groupBy   String[]
+  /// Royalty in basis points (0..10000) — engine marketplace extension
+  royaltyBps        String
+  royaltyRecipient  String
+  /// Free-form token metadata (wiki `updateMetadata`), stringified <= 1000 chars
+  metadata  Json
+  createdAtBlock Int
+  /// ISO time taken from the block header
+  createdAt String
+
+  @@index([issuer])
+}
+
+model InstanceRecord {
+  /// Storage key "<SYMBOL>:<id>" — wiki token ids are only unique per symbol
+  key             String  @id
+  /// Wiki token id: numeric string, unique within the symbol ("1", "573", ...)
+  id              String
+  symbol          String
+  seq             Int
+  owner           String
+  properties      Json
+  /// Set while the instance backs an open marketplace order.
+  listedOrderId   String?
+  /// Previous holder (wiki `previousAccount`) — set after the first transfer/sale
+  previousAccount String?
+  createdAtBlock  Int
+  createdAt       String
+
+  @@index([owner])
+  @@index([symbol])
+  @@index([listedOrderId])
+}
+
+model AccountRecord {
+  name           String @id
+  createdAtBlock Int
+  createdAt      String
+}
+
+model MarketOrderRecord {
+  id               String  @id
+  symbol           String
+  instanceId       String
+  seller           String
+  /// Decimal string in STEEM (3 dp)
+  price            String
+  currency         String
+  status           String
+  /// Royalty snapshot taken at placement time
+  royaltyBps       String
+  royaltyRecipient String
+  createdAtBlock   Int
+  updatedAtBlock   Int
+  filledAtBlock    Int?
+  fillBy           String?
+  settlement       Json?
+
+  @@index([status])
+  @@index([symbol])
+  @@index([seller])
+  @@index([instanceId])
+  @@index([createdAtBlock])
+}
+
+model TransactionLogRecord {
+  /// "<height>:<txId>:<opIndex>" — deterministic across replays
+  id         String  @id
+  height     Int
+  blockId    String
+  txId       String
+  opIndex    Int
+  action     String
+  actor      String
+  authLevel  String
+  symbol     String?
+  instanceId String?
+  /// APPLIED | FAILED | IGNORED
+  status     String
+  params     Json
+  error      Json?
+  mutations  Json?
+  events     Json?
+  timestamp  String
+
+  @@index([height])
+  @@index([actor])
+  @@index([instanceId])
+  @@index([symbol])
+  @@index([status])
+}
+
+/// Small key/value partition for counters (e.g. `order_seq`) and engine metadata.
+model SettingRecord {
+  key   String @id
+  value String
+}

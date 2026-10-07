@@ -1,0 +1,51 @@
+{
+  "name": "steemcraft-nft-engine",
+  "version": "1.0.0",
+  "description": "Production-grade deterministic Steem Layer 2 NFT Engine: block ingestion, sandboxed execution VM, off-chain state DB, GraphQL/REST/WebSocket APIs.",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "test": "jest --runInBand",
+    "test:unit": "jest --runInBand tests/unit",
+    "test:integration": "jest --runInBand tests/integration",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@apollo/server": "^5.5.1",
+    "@prisma/client": "^6.13.0",
+    "@steempro/dsteem": "^1.0.6",
+    "bignumber.js": "^9.3.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "graphql": "^16.9.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "optionalDependencies": {
+    "isolated-vm": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.13",
+    "jest": "^29.7.0",
+    "prisma": "^6.13.0",
+    "ts-jest": "^29.2.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

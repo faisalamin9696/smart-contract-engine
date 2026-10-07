@@ -1,0 +1,64 @@
+# ── Dokploy deployment ────────────────────────────────────────────────────────
+# Use this file as the Compose service's "Compose Path" in Dokploy.
+#
+#   1. Project → + Service → Compose → type "Docker Compose" → pick your git repo
+#   2. Compose Path:  docker-compose.dokploy.yml
+#   3. Environment tab:  DATABASE_URL=postgresql://user:pass@steemcraft-db-4jwfp1:5432/steemcraft
+#   4. Domains tab:      <api-domain>  → service `engine`, port 4000   (REST + GraphQL)
+#                        <ws-domain>   → service `engine`, port 4001   (WebSocket)
+#   5. Deploy
+#
+# The engine joins Dokploy's shared `dokploy-network`, which is what makes the
+# database hostname resolve and lets Traefik reach it.
+
+services:
+  # NOTE: no separate one-shot `migrate` service. Dokploy deploys this file as a
+  # Docker Swarm stack and Swarm *ignores* `depends_on`, so such a service never
+  # ran and the engine started against an empty database. The image's entrypoint
+  # applies `prisma migrate deploy` itself before starting the engine (set
+  # RUN_MIGRATIONS=false to manage migrations out-of-band instead).
+  engine:
+    build: .
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in the Dokploy Environment tab}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      STEEM_RPC_ENDPOINTS: ${STEEM_RPC_ENDPOINTS:-https://api.steemit.com,https://api.steemyy.com,https://api.moecki.online}
+      BLOCK_POLL_INTERVAL_MS: ${BLOCK_POLL_INTERVAL_MS:-3000}
+      UNDO_BUFFER_DEPTH: ${UNDO_BUFFER_DEPTH:-30}
+      NFT_OP_ID: ${NFT_OP_ID:-steem_nft_v1}
+      START_BLOCK_HEIGHT: ${START_BLOCK_HEIGHT:-}
+      PORT: ${PORT:-4000}
+      WS_PORT: ${WS_PORT:-4001}
+      GRAPHQL_PATH: ${GRAPHQL_PATH:-/graphql}
+      REST_ENABLED: ${REST_ENABLED:-true}
+      GRAPHQL_ENABLED: ${GRAPHQL_ENABLED:-true}
+      SANDBOX_PROVIDER: ${SANDBOX_PROVIDER:-auto}
+      SANDBOX_TIMEOUT_MS: ${SANDBOX_TIMEOUT_MS:-1000}
+      SANDBOX_MEMORY_LIMIT_MB: ${SANDBOX_MEMORY_LIMIT_MB:-128}
+      FAIL_ON_DEEP_FORK: ${FAIL_ON_DEEP_FORK:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Fail fast instead of silently serving in-memory state if DATABASE_URL is missing
+      STORAGE: ${STORAGE:-postgres}
+    # Direct TCP access for `curl <server>:4000/health` and non-proxied WS clients.
+    # Traefik (Domains tab) talks to these ports over dokploy-network, so you may delete
+    # this block entirely if everything should go through domains only.
+    ports:
+      - "${PORT:-4000}:${PORT:-4000}"
+      - "${WS_PORT:-4001}:${WS_PORT:-4001}"
+    networks:
+      - dokploy-network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:'+(process.env.PORT||4000)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+networks:
+  dokploy-network:
+    external: true

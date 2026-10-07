@@ -1,0 +1,14 @@
+# Build context hygiene: the image only needs sources + manifests.
+node_modules
+dist
+.git
+.env
+*.log
+coverage
+*.tsbuildinfo
+
+# Not needed to build/run the image (tests run on the host/CI).
+tests
+jest.config.cjs
+README.md
+docker-compose*.yml
