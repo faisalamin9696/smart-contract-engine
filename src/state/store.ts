@@ -1,9 +1,15 @@
 import {
   AccountSchema,
+  balanceKey,
+  BalanceSchema,
   CollectionSchema,
   InstanceSchema,
   MarketOrderSchema,
+  ParamSchema,
+  PARAM_KEY,
+  TokenSchema,
   type Account,
+  type Balance,
   type BlockRecord,
   type Collection,
   type EntityKind,
@@ -12,6 +18,8 @@ import {
   type JournalEntry,
   type MarketOrder,
   type OrderStatus,
+  type Param,
+  type Token,
   type TransactionLogRecord,
   type TxStatus,
 } from '../types/domain';
@@ -19,6 +27,22 @@ import {
 export interface ListInstancesQuery {
   owner?: string;
   symbol?: string;
+  limit: number;
+  offset: number;
+}
+
+export interface ListTokensQuery {
+  issuer?: string;
+  limit: number;
+  offset: number;
+}
+
+export interface BalanceFilter {
+  account?: string;
+  symbol?: string;
+}
+
+export interface ListBalancesQuery extends BalanceFilter {
   limit: number;
   offset: number;
 }
@@ -68,6 +92,9 @@ export interface EngineStore {
   countInstances(q: CountQuery): Promise<number>;
   listOrders(q: ListOrdersQuery): Promise<MarketOrder[]>;
   countOrders(q: CountQuery): Promise<number>;
+  listTokens(q: ListTokensQuery): Promise<Token[]>;
+  listBalances(q: ListBalancesQuery): Promise<Balance[]>;
+  countBalances(q: BalanceFilter): Promise<number>;
   listLogs(q: ListLogsQuery): Promise<TransactionLogRecord[]>;
 
   putBlock(block: BlockRecord): Promise<void>;
@@ -134,6 +161,26 @@ export async function getAccount(store: EngineStore, name: string): Promise<Acco
 export async function getOrder(store: EngineStore, id: string): Promise<MarketOrder | null> {
   const raw = await store.get('order', id);
   return raw === null ? null : MarketOrderSchema.parse(raw);
+}
+
+export async function getToken(store: EngineStore, symbol: string): Promise<Token | null> {
+  const raw = await store.get('token', symbol);
+  return raw === null ? null : TokenSchema.parse(raw);
+}
+
+export async function getBalance(
+  store: EngineStore,
+  account: string,
+  symbol: string,
+): Promise<Balance | null> {
+  const raw = await store.get('balance', balanceKey(account, symbol));
+  return raw === null ? null : BalanceSchema.parse(raw);
+}
+
+/** Reads the single `param` row (genesis admin/treasury + fee schedule). */
+export async function getParam(store: EngineStore): Promise<Param | null> {
+  const raw = await store.get('param', PARAM_KEY);
+  return raw === null ? null : ParamSchema.parse(raw);
 }
 
 export function entityKey(entity: EntityKind, key: string): string {

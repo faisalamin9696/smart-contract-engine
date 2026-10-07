@@ -1,15 +1,19 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import type {
   AccountRecord as PrismaAccountRow,
+  BalanceRecord as PrismaBalanceRow,
   BlockRecord as PrismaBlockRow,
   CollectionRecord as PrismaCollectionRow,
   InstanceRecord as PrismaInstanceRow,
   MarketOrderRecord as PrismaOrderRow,
+  ParamRecord as PrismaParamRow,
+  TokenRecord as PrismaTokenRow,
   TransactionLogRecord as PrismaLogRow,
 } from '@prisma/client';
 
 import type {
   Account,
+  Balance,
   BlockRecord,
   Collection,
   EntityKind,
@@ -18,15 +22,20 @@ import type {
   JsonValue,
   JournalEntry,
   MarketOrder,
+  Param,
+  Token,
   TransactionLogRecord,
   TxStatus,
 } from '../types/domain';
 import type {
+  BalanceFilter,
   CountQuery,
   EngineStore,
+  ListBalancesQuery,
   ListInstancesQuery,
   ListLogsQuery,
   ListOrdersQuery,
+  ListTokensQuery,
 } from '../state/store';
 
 type Client = PrismaClient | Prisma.TransactionClient;
@@ -207,6 +216,64 @@ function orderFromRow(r: PrismaOrderRow): MarketOrder {
   };
 }
 
+function tokenToRow(t: Token) {
+  return {
+    symbol: t.symbol,
+    name: t.name,
+    precision: t.precision,
+    maxSupply: t.maxSupply,
+    supply: t.supply,
+    issuer: t.issuer,
+    url: t.url,
+    metadata: t.metadata,
+    createdAtBlock: t.createdAtBlock,
+    createdAt: t.createdAt,
+  };
+}
+
+function tokenFromRow(r: PrismaTokenRow): Token {
+  return {
+    symbol: r.symbol,
+    name: r.name,
+    precision: r.precision,
+    maxSupply: r.maxSupply,
+    supply: r.supply,
+    issuer: r.issuer,
+    url: r.url,
+    metadata: r.metadata,
+    createdAtBlock: r.createdAtBlock,
+    createdAt: r.createdAt,
+  };
+}
+
+/** Balances are keyed by the composite `<account>:<SYMBOL>` (like instances). */
+function balanceToRow(key: string, b: Balance) {
+  return { key, account: b.account, symbol: b.symbol, quantity: b.quantity };
+}
+
+function balanceFromRow(r: PrismaBalanceRow): Balance {
+  return { account: r.account, symbol: r.symbol, quantity: r.quantity };
+}
+
+function paramToRow(key: string, p: Param) {
+  return {
+    key,
+    admin: p.admin,
+    treasury: p.treasury,
+    fees: asJson(p.fees),
+    feeTokens: p.feeTokens,
+  };
+}
+
+function paramFromRow(r: PrismaParamRow): Param {
+  return {
+    admin: r.admin,
+    treasury: r.treasury,
+    fees: readMap(r.fees) as unknown as Param['fees'],
+    feeTokens: r.feeTokens,
+  };
+}
+
 function blockFromRow(r: PrismaBlockRow): BlockRecord {
   return {
     height: r.height,
@@ -306,6 +373,18 @@ export class PrismaStateStore implements EngineStore {
         const r = await c.marketOrderRecord.findUnique({ where: { id: key } });
         return r ? (orderFromRow(r) as JsonValue) : null;
       }
+      case 'token': {
+        const r = await c.tokenRecord.findUnique({ where: { symbol: key } });
+        return r ? (tokenFromRow(r) as JsonValue) : null;
+      }
+      case 'balance': {
+        const r = await c.balanceRecord.findUnique({ where: { key } });
+        return r ? (balanceFromRow(r) as JsonValue) : null;
+      }
+      case 'param': {
+        const r = await c.paramRecord.findUnique({ where: { key } });
+        return r ? (paramFromRow(r) as JsonValue) : null;
+      }
       case 'meta': {
         const r = await c.settingRecord.findUnique({ where: { key } });
         return r ? r.value : null;
@@ -336,6 +415,21 @@ export class PrismaStateStore implements EngineStore {
         await c.marketOrderRecord.upsert({ where: { id: key }, create: data, update: data });
         return;
       }
+      case 'token': {
+        const data = tokenToRow(value as unknown as Token);
+        await c.tokenRecord.upsert({ where: { symbol: key }, create: data, update: data });
+        return;
+      }
+      case 'balance': {
+        const data = balanceToRow(key, value as unknown as Balance);
+        await c.balanceRecord.upsert({ where: { key }, create: data, update: data });
+        return;
+      }
+      case 'param': {
+        const data = paramToRow(key, value as unknown as Param);
+        await c.paramRecord.upsert({ where: { key }, create: data, update: data });
+        return;
+      }
       case 'meta': {
         const v = String(value);
         await c.settingRecord.upsert({
@@ -362,6 +456,15 @@ export class PrismaStateStore implements EngineStore {
         return;
       case 'order':
         await c.marketOrderRecord.deleteMany({ where: { id: key } });
+        return;
+      case 'token':
+        await c.tokenRecord.deleteMany({ where: { symbol: key } });
+        return;
+      case 'balance':
+        await c.balanceRecord.deleteMany({ where: { key } });
+        return;
+      case 'param':
+        await c.paramRecord.deleteMany({ where: { key } });
         return;
       case 'meta':
         await c.settingRecord.deleteMany({ where: { key } });
@@ -423,6 +526,38 @@ export class PrismaStateStore implements EngineStore {
     const where: Prisma.MarketOrderRecordWhereInput = {};
     if (q.symbol) where.symbol = q.symbol;
     return this.client.marketOrderRecord.count({ where });
+  }
+
+  async listTokens(q: ListTokensQuery): Promise<Token[]> {
+    const where: Prisma.TokenRecordWhereInput = {};
+    if (q.issuer) where.issuer = q.issuer;
+    const rows = await this.client.tokenRecord.findMany({
+      where,
+      orderBy: { symbol: 'asc' },
+      skip: q.offset,
+      take: q.limit,
+    });
+    return rows.map(tokenFromRow);
+  }
+
+  async listBalances(q: ListBalancesQuery): Promise<Balance[]> {
+    const where: Prisma.BalanceRecordWhereInput = {};
+    if (q.account) where.account = q.account;
+    if (q.symbol) where.symbol = q.symbol;
+    const rows = await this.client.balanceRecord.findMany({
+      where,
+      orderBy: [{ account: 'asc' }, { symbol: 'asc' }],
+      skip: q.offset,
+      take: q.limit,
+    });
+    return rows.map(balanceFromRow);
+  }
+
+  async countBalances(q: BalanceFilter): Promise<number> {
+    const where: Prisma.BalanceRecordWhereInput = {};
+    if (q.account) where.account = q.account;
+    if (q.symbol) where.symbol = q.symbol;
+    return this.client.balanceRecord.count({ where });
   }
 
   async listLogs(q: ListLogsQuery): Promise<TransactionLogRecord[]> {

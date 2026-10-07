@@ -29,6 +29,9 @@ export async function buildSnapshot(
     instance: new Set<string>(),
     account: new Set<string>(),
     order: new Set<string>(),
+    token: new Set<string>(),
+    balance: new Set<string>(),
+    param: new Set<string>(),
     meta: new Set<string>(),
   };
 
@@ -124,7 +127,7 @@ export async function buildSnapshot(
     }
   }
 
-  for (const entity of ['collection', 'instance', 'account', 'order', 'meta'] as const) {
+  for (const entity of ['collection', 'instance', 'account', 'order', 'token', 'balance', 'param', 'meta'] as const) {
     for (const key of need[entity]) {
       (snapshot[entity] as Record<string, unknown>)[key] = await store.get(entity, key);
     }

@@ -74,7 +74,7 @@ two DNS `A` records before deploying (certificates take ~10 s after the first re
 Click **Deploy**. Expected sequence in the logs:
 
 ```
-engine   → applying database migrations … 0001_init, 0002_wiki_nft_alignment (or "No pending migrations")
+engine   → applying database migrations … 0001_init, 0002_wiki_nft_alignment, 0003_tokens (or "No pending migrations")
 engine   → DATABASE_URL … connected to PostgreSQL
 engine   → contract sandbox ready  provider=isolated-vm
 engine   → http server listening / websocket server listening / indexer started

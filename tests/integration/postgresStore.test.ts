@@ -6,7 +6,17 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaStateStore } from '../../src/db/prismaStateStore';
 import { MemoryStore } from '../../src/state/memoryStore';
 import type { EngineStore } from '../../src/state/store';
-import type { BlockRecord, Collection, Instance, JournalEntry, MarketOrder, TransactionLogRecord } from '../../src/types/domain';
+import type {
+  BlockRecord,
+  Collection,
+  Instance,
+  JournalEntry,
+  MarketOrder,
+  Param,
+  Token,
+  TransactionLogRecord,
+} from '../../src/types/domain';
+import { ParamSchema } from '../../src/types/domain';
 
 /**
  * Postgres parity suite for {@link PrismaStateStore}.
@@ -95,6 +105,40 @@ function order(id: string, symbol: string, instanceId: string, seller: string, c
   };
 }
 
+function token(symbol: string, issuer = 'tstalice'): Token {
+  return {
+    symbol,
+    name: 'Parity Token',
+    precision: 3,
+    maxSupply: '9007199254740991',
+    supply: '1000.000',
+    issuer,
+    url: 'https://example.com/token',
+    metadata: '{"tag":"parity"}',
+    createdAtBlock: H1,
+    createdAt: '2026-01-01T00:00:00',
+  };
+}
+
+function balance(account: string, symbol: string, quantity: string) {
+  return { account, symbol, quantity };
+}
+
+function param(): Param {
+  return {
+    admin: 'tstadmin',
+    treasury: 'tstadmin',
+    fees: {
+      nftCreationFee: '20',
+      addPropertyFee: '20',
+      tokenCreationFee: '0',
+      issueFee: '0',
+      fillOrderFeeBps: '200',
+    },
+    feeTokens: ['SCE'],
+  };
+}
+
 function block(height: number, blockId: string): BlockRecord {
   return {
     height,
@@ -153,6 +197,10 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await client.marketOrderRecord.deleteMany({ where: { id: { startsWith: 'ORD-TST' } } });
     await client.instanceRecord.deleteMany({ where: { symbol: 'TST' } });
     await client.collectionRecord.deleteMany({ where: { symbol: 'TST' } });
+    await client.tokenRecord.deleteMany({ where: { issuer: 'tstalice' } });
+    await client.balanceRecord.deleteMany({ where: { key: { startsWith: 'tst' } } });
+    // Fixture params live under a TST_* key — never the seeded `param` row.
+    await client.paramRecord.deleteMany({ where: { key: { startsWith: 'TST' } } });
     await client.transactionLogRecord.deleteMany({ where: { height: { gte: H1 } } });
     await client.journalEntry.deleteMany({ where: { height: { gte: H1 } } });
     await client.blockRecord.deleteMany({ where: { height: { gte: H1 } } });
@@ -165,6 +213,9 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
       await client.marketOrderRecord.deleteMany({ where: { id: { startsWith: 'ORD-TST' } } });
       await client.instanceRecord.deleteMany({ where: { symbol: 'TST' } });
       await client.collectionRecord.deleteMany({ where: { symbol: 'TST' } });
+      await client.tokenRecord.deleteMany({ where: { issuer: 'tstalice' } });
+      await client.balanceRecord.deleteMany({ where: { key: { startsWith: 'tst' } } });
+      await client.paramRecord.deleteMany({ where: { key: { startsWith: 'TST' } } });
       await client.transactionLogRecord.deleteMany({ where: { height: { gte: H1 } } });
       await client.journalEntry.deleteMany({ where: { height: { gte: H1 } } });
       await client.blockRecord.deleteMany({ where: { height: { gte: H1 } } });
@@ -174,6 +225,29 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await reference?.close();
   });
 
+  it('seeded the genesis param row via migration 0003 (fee bootstrap: all fees 0)', async () => {
+    const seeded = await client.paramRecord.findUnique({ where: { key: 'param' } });
+    expect(seeded).not.toBeNull();
+    const parsed = ParamSchema.parse({
+      admin: seeded!.admin,
+      treasury: seeded!.treasury,
+      fees: seeded!.fees,
+      feeTokens: seeded!.feeTokens,
+    });
+    expect(parsed.admin).toBe('steempro.com');
+    expect(parsed.treasury).toBe('steempro.com');
+    expect(parsed.feeTokens).toEqual(['SCE']);
+    // Fee bootstrap: SCE cannot pay fees before it exists — genesis raises these
+    // via setParam after tokens.create/issue of SCE.
+    expect(parsed.fees).toEqual({
+      nftCreationFee: '0',
+      addPropertyFee: '0',
+      tokenCreationFee: '0',
+      issueFee: '0',
+      fillOrderFeeBps: '0',
+    });
+  });
+
   it('round-trips every entity partition byte-for-byte', async () => {
     const accounts = { name: 'tstalice', createdAtBlock: H1, createdAt: '2026-01-01T00:00:00' };
 
@@ -181,6 +255,9 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await store.put('instance', 'TST:1', instance('1', 'TST', 1, 'tstbob'));
     await store.put('account', 'tstalice', accounts);
     await store.put('order', 'ORD-TST0001', order('ORD-TST0001', 'TST', 'TST:1', 'tstbob', H1));
+    await store.put('token', 'TST', token('TST'));
+    await store.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
+    await store.put('param', 'TST_param', param());
     await store.put('meta', 'order_seq', '1');
 
     // Same writes through MemoryStore: the two back-ends must be indistinguishable.
@@ -188,6 +265,9 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await reference.put('instance', 'TST:1', instance('1', 'TST', 1, 'tstbob'));
     await reference.put('account', 'tstalice', accounts);
     await reference.put('order', 'ORD-TST0001', order('ORD-TST0001', 'TST', 'TST:1', 'tstbob', H1));
+    await reference.put('token', 'TST', token('TST'));
+    await reference.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
+    await reference.put('param', 'TST_param', param());
     await reference.put('meta', 'order_seq', '1');
 
     for (const [entity, key] of [
@@ -195,12 +275,18 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
       ['instance', 'TST:1'],
       ['account', 'tstalice'],
       ['order', 'ORD-TST0001'],
+      ['token', 'TST'],
+      ['balance', 'tstbob:TST'],
+      ['param', 'TST_param'],
       ['meta', 'order_seq'],
     ] as const) {
       expect(await store.get(entity, key)).toEqual(await reference.get(entity, key));
       expect(await store.get(entity, key)).not.toBeNull();
     }
 
+    await store.delete('balance', 'tstbob:TST');
+    expect(await store.get('balance', 'tstbob:TST')).toBeNull();
+    await store.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
     await store.delete('meta', 'order_seq');
     expect(await store.get('meta', 'order_seq')).toBeNull();
     await store.put('meta', 'order_seq', '1');
@@ -222,6 +308,22 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
       await reference.listOrders({ status: 'OPEN', limit: 10, offset: 0 }),
     );
     expect(await store.countOrders({ symbol: 'TST' })).toBe(1);
+    await store.put('token', 'TSZ', token('TSZ'));
+    await reference.put('token', 'TSZ', token('TSZ'));
+    expect(await store.listTokens({ issuer: 'tstalice', limit: 10, offset: 0 })).toEqual(
+      await reference.listTokens({ issuer: 'tstalice', limit: 10, offset: 0 }),
+    );
+    expect(await store.listTokens({ limit: 1, offset: 1 })).toEqual(
+      await reference.listTokens({ limit: 1, offset: 1 }),
+    );
+    await store.put('balance', 'tstcarol:TST', balance('tstcarol', 'TST', '1.000'));
+    await reference.put('balance', 'tstcarol:TST', balance('tstcarol', 'TST', '1.000'));
+    expect(await store.listBalances({ symbol: 'TST', limit: 10, offset: 0 })).toEqual(
+      await reference.listBalances({ symbol: 'TST', limit: 10, offset: 0 }),
+    );
+    expect(await store.countBalances({ account: 'tstcarol' })).toBe(
+      await reference.countBalances({ account: 'tstcarol' }),
+    );
     expect(await store.listLogs({ actor: 'nobody', limit: 10, offset: 0 })).toEqual(
       await reference.listLogs({ actor: 'nobody', limit: 10, offset: 0 }),
     );

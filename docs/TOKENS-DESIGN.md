@@ -1,6 +1,7 @@
 # Tokens Contract — Design Brief (Phase 1)
 
-Status: **design agreed, not started** (2026-10-07)
+Status: **Phase 1 in progress** — build order step 1 (migration 0003 + store layer)
+done (2026-10-07)
 Wiki source: https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md
 
 ## Goal
@@ -41,8 +42,8 @@ maxSupply cap `9,007,199,254,740,991` (wiki/JS max safe integer).
   "fees": {
     "nftCreationFee": "0",   // target 20 SCE   ("listing a collection")
     "addPropertyFee": "0",   // target 20 SCE, first 3 properties free (wiki rule)
-    "tokenCreationFee": "0", // wiki: "a token creation fee might be enforced"
-    "issueFee": "0",         // wiki formula: base + base×#properties (dust)
+    "tokenCreationFee": "0", // target 20 SCE (confirmed 2026-10-07)
+    "issueFee": "0",         // target 0 — wiki formula (base + base×#properties) is dust
     "fillOrderFeeBps": "0"   // target 200 (2%) → treasury
   },
   "feeTokens": ["SCE"]
@@ -104,13 +105,15 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
 7. Tests: unit + determinism; integration parity suite needs
    `TEST_DATABASE_URL` (CI job planned)
 
-## Open questions (need user input at kickoff)
+## Kickoff decisions (confirmed 2026-10-07)
 
-- **Genesis admin/treasury account** — user's Steem account, seeded once by
-  migration
-- **Fee schedule confirm**: nft create 20 SCE · addProperty(4th+) 20 SCE ·
-  token create ? · issue free/dust · placeOrder free · fillOrder 2 %
-- SCE initial supply + distribution
+- **Genesis admin/treasury account**: `steempro.com` — seeded once by migration
+  `0003` (the `param` row).
+- **Fee schedule**: nft create 20 SCE · addProperty(4th+) 20 SCE ·
+  token create 20 SCE · issue free · placeOrder free · fillOrder 2 % (200 bps) —
+  migration seeds all fees **0** (fee bootstrap), genesis raises them via
+  `setParam` after SCE exists.
+- **Still open**: SCE initial supply + distribution
 
 ## Repo state at handoff
 

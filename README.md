@@ -58,7 +58,7 @@ lost on restart. That mode is for demos and tests only.
 ```bash
 cp .env.example .env          # edit DATABASE_URL
 docker compose up -d postgres
-npx prisma migrate deploy     # applies prisma/migrations (0001_init, 0002_wiki_nft_alignment)
+npx prisma migrate deploy     # applies prisma/migrations (0001_init, 0002_wiki_nft_alignment, 0003_tokens)
 npm start                     # node dist/src/index.js  (or: npm run build && npm start)
 ```
 

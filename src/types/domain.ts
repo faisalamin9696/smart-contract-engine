@@ -6,13 +6,24 @@ export type JsonValue = Json;
 export type JsonMap = Record<string, JsonValue>;
 
 /** Mritable state partitions. Every write to one of these is journaled for undo. */
-export type EntityKind = 'collection' | 'instance' | 'account' | 'order' | 'meta';
+export type EntityKind =
+  | 'collection'
+  | 'instance'
+  | 'account'
+  | 'order'
+  | 'token'
+  | 'balance'
+  | 'param'
+  | 'meta';
 
 export interface EntityValueMap {
   collection: Collection;
   instance: Instance;
   account: Account;
   order: MarketOrder;
+  token: Token;
+  balance: Balance;
+  param: Param;
   meta: string;
 }
 
@@ -115,10 +126,80 @@ export function instanceKey(symbol: string, id: string): string {
   return `${symbol}:${id}`;
 }
 
+/** Storage key of the single fee-schedule row (entity `param`). */
+export const PARAM_KEY = 'param';
+
+/** Balance key: `<account>:<SYMBOL>` (one row per holder and token). */
+export function balanceKey(account: string, symbol: string): string {
+  return `${account}:${symbol}`;
+}
+
 export type Account = {
   name: string;
   createdAtBlock: number;
   createdAt: string;
+}
+
+/**
+ * Fee schedule stored inside the `param` row (in state — never in env — so it is
+ * deterministic and re-org safe). All values are decimal/basis-point **strings**.
+ * Migration 0003 seeds every fee at "0"; the genesis admin raises them to the target
+ * values via `setParam` once SCE exists (fee bootstrap, see docs/TOKENS-DESIGN.md).
+ */
+export type FeeSchedule = {
+  /** `nft` create — target 20 SCE ("listing a collection"). */
+  nftCreationFee: string;
+  /** `nft` addProperty, 4th and later properties — target 20 SCE (first 3 free). */
+  addPropertyFee: string;
+  /** `tokens` create — target TBD (wiki: "a token creation fee might be enforced"). */
+  tokenCreationFee: string;
+  /** `issue` — target 0 (wiki's base + base×#properties formula is dust). */
+  issueFee: string;
+  /** `fillOrder` treasury cut in basis points — target 200 (2%). */
+  fillOrderFeeBps: string;
+}
+
+/** Fungible token definition — the `token` table (wiki `tokens` contract). */
+export type Token = {
+  symbol: string;
+  /** Friendly name (letters/numbers/whitespace, <= 50). */
+  name: string;
+  /** Decimal places accepted for this token (wiki: 0..8). */
+  precision: number;
+  /** '0' means unlimited (wiki: omitted maxSupply). Decimal string, cap MAX_SAFE. */
+  maxSupply: string;
+  /** Tokens ever issued — decimal string, monotonic (never decreases). */
+  supply: string;
+  /** Steem account that created the token (wiki `issuer`). */
+  issuer: string;
+  /** Project URL (wiki `updateUrl`), <= 255 chars. */
+  url: string;
+  /** Free-form metadata (wiki `updateMetadata`), stringified <= 1000 chars. */
+  metadata: string;
+  createdAtBlock: number;
+  /** Deterministic timestamp taken from the block header (never host clock). */
+  createdAt: string;
+}
+
+/** One holder's quantity of one token — the `balance` table, keyed `<account>:<SYMBOL>`. */
+export type Balance = {
+  /** Holder account (the `<account>` half of the storage key). */
+  account: string;
+  /** Token symbol (the `<SYMBOL>` half of the storage key). */
+  symbol: string;
+  /** Decimal string honouring the token's precision (BigNumber arithmetic only). */
+  quantity: string;
+}
+
+/** Genesis admin/treasury + fee schedule — the single `param` row. */
+export type Param = {
+  /** Only signer allowed to run `setParam`. */
+  admin: string;
+  /** Fee destination account. */
+  treasury: string;
+  fees: FeeSchedule;
+  /** Tokens accepted for fee payment (e.g. ["SCE"]). */
+  feeTokens: string[];
 }
 
 export type OrderStatus = 'OPEN' | 'FILLED' | 'CANCELLED';
@@ -226,11 +307,23 @@ export interface StateSnapshot {
   instance: Record<string, Instance | null>;
   account: Record<string, Account | null>;
   order: Record<string, MarketOrder | null>;
+  token: Record<string, Token | null>;
+  balance: Record<string, Balance | null>;
+  param: Record<string, Param | null>;
   meta: Record<string, string | null>;
 }
 
 export function emptySnapshot(): StateSnapshot {
-  return { collection: {}, instance: {}, account: {}, order: {}, meta: {} };
+  return {
+    collection: {},
+    instance: {},
+    account: {},
+    order: {},
+    token: {},
+    balance: {},
+    param: {},
+    meta: {},
+  };
 }
 
 const UINT = /^[0-9]{1,20}$/;
@@ -242,10 +335,12 @@ const TOKEN_ID = /^[0-9]{1,15}$/;
 const INSTANCE_KEY = /^[A-Z]{3,10}:[0-9]{1,15}$/;
 const ACCOUNT = /^[a-z][a-z0-9.-]{2,15}$/;
 const AMOUNT = /^[0-9]{1,15}(\.[0-9]{1,3})?$/;
+/** Token quantities: up to 8 fractional digits (wiki precision 0..8). */
+const DECIMAL = /^[0-9]{1,15}(\.[0-9]{1,8})?$/;
 /** Wiki: letters, numbers and whitespace only, max length 50. */
 const NAME = /^[A-Za-z0-9 ]{1,50}$/;
 
-export const patterns = { UINT, SYMBOL, TOKEN_ID, INSTANCE_KEY, ACCOUNT, AMOUNT, NAME };
+export const patterns = { UINT, SYMBOL, TOKEN_ID, INSTANCE_KEY, ACCOUNT, AMOUNT, DECIMAL, NAME };
 
 /** Rejects floating point numbers anywhere inside a JSON structure. */
 export function assertNoFloats(value: unknown, path = '$'): void {
@@ -375,6 +470,50 @@ export const MarketOrderSchema: z.ZodType<MarketOrder> = z
   })
   .strict() as unknown as z.ZodType<MarketOrder>;
 
+export const TokenSchema: z.ZodType<Token> = z
+  .object({
+    symbol: z.string().regex(SYMBOL),
+    name: z.string().regex(NAME),
+    precision: z.number().int().min(0).max(8),
+    maxSupply: z.string().regex(UINT),
+    supply: z.string().regex(DECIMAL),
+    issuer: z.string().regex(ACCOUNT),
+    url: z.string().max(255),
+    metadata: z.string().max(1000),
+    createdAtBlock: z.number().int().nonnegative(),
+    createdAt: z.string().min(1),
+  })
+  .strict() as unknown as z.ZodType<Token>;
+
+export const BalanceSchema: z.ZodType<Balance> = z
+  .object({
+    account: z.string().regex(ACCOUNT),
+    symbol: z.string().regex(SYMBOL),
+    quantity: z.string().regex(DECIMAL),
+  })
+  .strict() as unknown as z.ZodType<Balance>;
+
+const FeeScheduleSchema: z.ZodType<FeeSchedule> = z
+  .object({
+    nftCreationFee: z.string().regex(DECIMAL),
+    addPropertyFee: z.string().regex(DECIMAL),
+    tokenCreationFee: z.string().regex(DECIMAL),
+    issueFee: z.string().regex(DECIMAL),
+    fillOrderFeeBps: z.string().regex(UINT).refine((v) => Number(v) <= 10000, {
+      message: 'fillOrderFeeBps must be <= 10000',
+    }),
+  })
+  .strict() as unknown as z.ZodType<FeeSchedule>;
+
+export const ParamSchema: z.ZodType<Param> = z
+  .object({
+    admin: z.string().regex(ACCOUNT),
+    treasury: z.string().regex(ACCOUNT),
+    fees: FeeScheduleSchema,
+    feeTokens: z.array(z.string().regex(SYMBOL)).max(10),
+  })
+  .strict() as unknown as z.ZodType<Param>;
+
 const metaSchema = z.string().regex(UINT);
 
 /** Validates a single after-image produced by the sandbox. */
@@ -388,6 +527,12 @@ export function parseEntityValue(entity: EntityKind, value: unknown): EntityValu
       return AccountSchema.parse(value);
     case 'order':
       return MarketOrderSchema.parse(value);
+    case 'token':
+      return TokenSchema.parse(value);
+    case 'balance':
+      return BalanceSchema.parse(value);
+    case 'param':
+      return ParamSchema.parse(value);
     case 'meta':
       return metaSchema.parse(value);
     default: {

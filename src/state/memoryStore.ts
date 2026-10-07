@@ -1,7 +1,10 @@
 import {
+  BalanceSchema,
   CollectionSchema,
   InstanceSchema,
   MarketOrderSchema,
+  TokenSchema,
+  type Balance,
   type BlockRecord,
   type Collection,
   type EntityKind,
@@ -9,11 +12,30 @@ import {
   type JsonValue,
   type JournalEntry,
   type MarketOrder,
+  type Token,
   type TransactionLogRecord,
 } from '../types/domain';
-import type { CountQuery, EngineStore, ListInstancesQuery, ListLogsQuery, ListOrdersQuery } from './store';
+import type {
+  BalanceFilter,
+  CountQuery,
+  EngineStore,
+  ListBalancesQuery,
+  ListInstancesQuery,
+  ListLogsQuery,
+  ListOrdersQuery,
+  ListTokensQuery,
+} from './store';
 
-const ENTITIES: EntityKind[] = ['collection', 'instance', 'account', 'order', 'meta'];
+const ENTITIES: EntityKind[] = [
+  'collection',
+  'instance',
+  'account',
+  'order',
+  'token',
+  'balance',
+  'param',
+  'meta',
+];
 
 interface Snapshot {
   kv: Record<string, [string, JsonValue][]>;
@@ -35,6 +57,9 @@ export class MemoryStore implements EngineStore {
     instance: new Map(),
     account: new Map(),
     order: new Map(),
+    token: new Map(),
+    balance: new Map(),
+    param: new Map(),
     meta: new Map(),
   };
   private blocks = new Map<number, BlockRecord>();
@@ -99,6 +124,32 @@ export class MemoryStore implements EngineStore {
     let count = 0;
     for (const raw of this.kv.order.values()) {
       const row = MarketOrderSchema.parse(raw);
+      if (q.symbol && row.symbol !== q.symbol) continue;
+      count += 1;
+    }
+    return count;
+  }
+
+  async listTokens(q: ListTokensQuery): Promise<Token[]> {
+    let rows = [...this.kv.token.entries()].map(([, v]) => TokenSchema.parse(v));
+    if (q.issuer) rows = rows.filter((r) => r.issuer === q.issuer);
+    rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return rows.slice(q.offset, q.offset + q.limit);
+  }
+
+  async listBalances(q: ListBalancesQuery): Promise<Balance[]> {
+    let rows = [...this.kv.balance.entries()].map(([, v]) => BalanceSchema.parse(v));
+    if (q.account) rows = rows.filter((r) => r.account === q.account);
+    if (q.symbol) rows = rows.filter((r) => r.symbol === q.symbol);
+    rows.sort((a, b) => a.account.localeCompare(b.account) || a.symbol.localeCompare(b.symbol));
+    return rows.slice(q.offset, q.offset + q.limit);
+  }
+
+  async countBalances(q: BalanceFilter): Promise<number> {
+    let count = 0;
+    for (const raw of this.kv.balance.values()) {
+      const row = BalanceSchema.parse(raw);
+      if (q.account && row.account !== q.account) continue;
       if (q.symbol && row.symbol !== q.symbol) continue;
       count += 1;
     }

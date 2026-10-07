@@ -53,6 +53,15 @@ const IMMUTABLE_FIELDS: Record<EntityKind, readonly string[]> = {
     'royaltyRecipient',
     'createdAtBlock',
   ],
+  // Token: `supply` grows (issue) and `precision` may only rise (updatePrecision) —
+  // both are invariants for the tokens handlers; identity and the issuance cap are
+  // frozen. `name`/`url`/`metadata` stay editable, `issuer` via transferOwnership.
+  token: ['symbol', 'maxSupply', 'createdAtBlock', 'createdAt'],
+  // Balance: only `quantity` moves; the two key halves identify the holder row.
+  balance: ['account', 'symbol'],
+  // Genesis config seeded by migration 0003. `setParam` may reprice the schedule
+  // (and its fee tokens) but never re-point admin/treasury: that is a migration.
+  param: ['admin', 'treasury'],
   meta: [],
 };
 

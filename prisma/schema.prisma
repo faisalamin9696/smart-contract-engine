@@ -42,7 +42,7 @@ model BlockRecord {
 model JournalEntry {
   height Int
   seq    Int
-  /// Entity partition: collection | instance | account | order | meta
+  /// Entity partition: collection | instance | account | order | token | balance | param | meta
   entity String
   key    String
   /// SQL NULL means "the key did not exist before this mutation".
@@ -177,4 +177,60 @@ model TransactionLogRecord {
 model SettingRecord {
   key   String @id
   value String
+}
+
+/// Fungible token definition (wiki `tokens` contract `create`).
+model TokenRecord {
+  symbol    String @id
+  /// Friendly name (wiki: letters/numbers/whitespace, <= 50)
+  name      String
+  /// Decimal places accepted for this token (wiki: 0..8)
+  precision Int
+  /// "0" = unlimited (wiki: omitted maxSupply); decimal string, cap 9007199254740991
+  maxSupply String
+  /// Tokens ever issued (wiki `supply`) — decimal string, never decreases
+  supply    String
+  /// Steem account that created the token (wiki `issuer`)
+  issuer    String
+  /// Project URL (wiki `updateUrl`), <= 255 chars
+  url       String
+  /// Free-form metadata (wiki `updateMetadata`), stringified <= 1000 chars
+  metadata  String
+  createdAtBlock Int
+  /// ISO time taken from the block header
+  createdAt String
+
+  @@index([issuer])
+}
+
+/// Fungible balance: one row per `<account>:<SYMBOL>` (entity key), decimal-string
+/// quantity honouring the token's precision.
+model BalanceRecord {
+  /// Storage key "<account>:<SYMBOL>"
+  key      String @id
+  /// Holder account (redundant with the key — indexed for `balances(account)` reads)
+  account  String
+  /// Token symbol
+  symbol   String
+  /// Decimal string (BigNumber arithmetic only; never a float)
+  quantity String
+
+  @@index([account])
+  @@index([symbol])
+}
+
+/// Genesis admin/treasury + fee schedule: the single `param` row (entity key "param").
+/// Fees live in state — never in env — so the schedule is deterministic and re-org safe.
+model ParamRecord {
+  /// Fixed key of the single row ("param")
+  key      String @id
+  /// Only signer allowed to run `setParam`
+  admin    String
+  /// Fee destination account
+  treasury String
+  /// Fee schedule: nftCreationFee/addPropertyFee/tokenCreationFee/issueFee (decimal
+  /// strings) + fillOrderFeeBps (uint string). Seeded all-zero by migration 0003.
+  fees     Json
+  /// Tokens accepted for fee payment (e.g. ["SCE"])
+  feeTokens String[]
 }
