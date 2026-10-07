@@ -37,8 +37,8 @@ maxSupply cap `9,007,199,254,740,991` (wiki/JS max safe integer).
 
 ```jsonc
 {
-  "admin": "<genesis Steem account>",        // only signer allowed to setParam
-  "treasury": "<fee destination account>",
+  "admin": "steempro.com",    // only signer allowed to setParam (user's account, confirmed 2026-10-07)
+  "treasury": "steempro.com", // fee destination (user's account, confirmed 2026-10-07)
   "fees": {
     "nftCreationFee": "0",   // target 20 SCE   ("listing a collection")
     "addPropertyFee": "0",   // target 20 SCE, first 3 properties free (wiki rule)
