@@ -6,21 +6,33 @@ import { assertUintString } from '../utils/bn';
  *
  * Two wire formats are accepted (both parse to the same {@link Envelope}):
  *
- *  1. **Standard (wiki)** — the steemsmartcontracts `nft` contract format:
+ *  1. **Standard (wiki)** — the steemsmartcontracts contract format:
  *     `{ "contractName": "nft", "contractAction": "issue", "contractPayload": { ... } }`
- *  2. **Engine shorthand** — `{ "action": "issue", "params": { ... } }`
+ *  2. **Engine shorthand** — `{ "action": "issue", "params": { ... } }`, optionally
+ *     carrying `"contract": "tokens"` (defaults to `nft` for back-compatibility).
+ *
+ * One op id multiplexes both contracts (`nft` and `tokens`) — the same pattern as the
+ * real Steem Engine, where `contractName` inside the payload selects the contract even
+ * though every call shares a single `custom_json` id. Shared action names (`create`,
+ * `issue`, `transfer`, `burn`, `updateUrl`, `updateMetadata`, `transferOwnership`)
+ * are resolved per contract: each contract has its own action list, param schemas and
+ * entity allow list.
  *
  * Action names and parameters follow
  * https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md
- * (the marketplace actions are an engine extension — they live in a separate contract
- * upstream and are exposed here under the same envelope).
+ * and .../Tokens-Contract.md (the marketplace actions are an engine extension — they
+ * live in a separate contract upstream and are exposed here under the same envelope).
  *
  * Payloads are validated twice: structurally here (ingestion time, so malformed user
  * input is rejected before it ever reaches the VM) and semantically inside the sandbox.
  */
 
-export const ACTIONS = [
-  // ---- standard `nft` contract -------------------------------------------
+/** Contracts implemented under this op id (anything else is `UNKNOWN_CONTRACT`). */
+export const CONTRACTS = ['nft', 'tokens'] as const;
+export type ContractName = (typeof CONTRACTS)[number];
+
+/** Standard `nft` contract actions (wiki NFT-Contracts + the marketplace extension). */
+export const NFT_ACTIONS = [
   'create',
   'updateUrl',
   'updateMetadata',
@@ -47,16 +59,46 @@ export const ACTIONS = [
   'cancelOrder',
 ] as const;
 
-export type ActionName = (typeof ACTIONS)[number];
+/** `tokens` contract actions — v1 scope of docs/TOKENS-DESIGN.md (wiki Tokens-Contract). */
+export const TOKENS_ACTIONS = [
+  'create',
+  'issue',
+  'transfer',
+  'burn',
+  'updateUrl',
+  'updateMetadata',
+  'transferOwnership',
+  'updatePrecision',
+] as const;
+
+export type NftActionName = (typeof NFT_ACTIONS)[number];
+export type TokenActionName = (typeof TOKENS_ACTIONS)[number];
+/** Any action name across both contracts (shared names appear in both lists). */
+export type ActionName = NftActionName | TokenActionName;
+
+/** Every action either contract accepts (union — used for diagnostics). */
+export const ACTIONS = [...NFT_ACTIONS, ...TOKENS_ACTIONS] as const;
+
+export const ACTIONS_BY_CONTRACT: Record<ContractName, readonly ActionName[]> = {
+  nft: NFT_ACTIONS,
+  tokens: TOKENS_ACTIONS,
+};
 
 /**
  * Actions we deliberately do not implement, with the reason surfaced to the sender.
- * (Delegation and locked tokens need state/entities this L2 does not model yet.)
+ * (Delegation, staking and locked tokens need state/entities this L2 does not model
+ * yet — see the deferral table in docs/TOKENS-DESIGN.md.)
  */
 export const UNSUPPORTED_ACTION_HINTS: Record<string, string> = {
   enableDelegation: 'delegation is not supported by this engine',
   delegate: 'delegation is not supported by this engine',
   undelegate: 'delegation is not supported by this engine',
+  // ---- tokens v1 deferrals ----
+  transferToContract: 'contract accounts are not supported yet (deferred, see docs/TOKENS-DESIGN.md)',
+  enableStaking: 'staking is not supported by this engine',
+  stake: 'staking is not supported by this engine',
+  unstake: 'staking is not supported by this engine',
+  cancelUnstake: 'staking is not supported by this engine',
   // Pre-alignment names: tell old clients what replaced them.
   createCollection: 'renamed to "create" (wiki NFT-Contracts)',
   mint: 'renamed to "issue" (wiki NFT-Contracts)',
@@ -82,6 +124,11 @@ export const UintStringSchema = z.string().regex(/^[0-9]{1,20}$/, 'must be an un
 export const AmountSchema = z
   .string()
   .regex(/^[0-9]{1,15}(\.[0-9]{1,3})?$/, 'must be an amount with at most 3 decimal places');
+/** Wiki token quantities: decimal strings; the fractional part is capped by the
+ *  token's precision (0..8), which the contract validates against the token row. */
+export const QuantitySchema = z
+  .string()
+  .regex(/^[0-9]{1,15}(\.[0-9]{1,8})?$/, 'must be a decimal amount with at most 8 decimal places');
 
 /** Wiki allows `user | contract`; this engine only models Steem accounts. */
 const TypeSchema = z.enum(['user', 'contract']);
@@ -139,6 +186,21 @@ const royaltyBpsSchema = UintStringSchema.refine((v) => {
   }
 }, 'royaltyBps must be <= 10000');
 
+/** Wiki `maxSupply`: an integer string between 1 and the JS max safe integer. */
+function refineMaxSupply(value: { maxSupply?: string }, ctx: z.RefinementCtx): void {
+  if (value.maxSupply === undefined) return;
+  try {
+    assertUintString(value.maxSupply);
+    const n = BigInt(value.maxSupply);
+    if (n < 1n || n > BigInt(MAX_SAFE_INT)) throw new Error('out of range');
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `maxSupply must be between 1 and ${MAX_SAFE_INT}`,
+    });
+  }
+}
+
 /* --------------------------------------------------------------- param schemas */
 
 const CreateParams = z
@@ -157,19 +219,7 @@ const CreateParams = z
     royaltyRecipient: AccountNameSchema.optional(),
   })
   .strict()
-  .superRefine((value, ctx) => {
-    if (value.maxSupply === undefined) return;
-    try {
-      assertUintString(value.maxSupply);
-      const n = BigInt(value.maxSupply);
-      if (n < 1n || n > BigInt(MAX_SAFE_INT)) throw new Error('out of range');
-    } catch {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `maxSupply must be between 1 and ${MAX_SAFE_INT}`,
-      });
-    }
-  });
+  .superRefine(refineMaxSupply);
 
 const MetadataParams = z
   .object({ symbol: SymbolSchema, metadata: FreeForm })
@@ -283,7 +333,47 @@ const PlaceOrderParams = z
 const FillOrderParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
 const CancelOrderParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
 
-const PARAM_SCHEMAS: Record<ActionName, z.ZodTypeAny> = {
+/* --------------------------------------------------- tokens contract params */
+
+/**
+ * Wiki `tokens.create` — name, symbol and precision are required; `maxSupply`
+ * omitted means unlimited (stored as "0"), `url` optional, `metadata` starts empty
+ * and is edited later through `updateMetadata`.
+ */
+const TokenCreateParams = z
+  .object({
+    symbol: SymbolSchema,
+    name: NameSchema,
+    precision: z.number().int().min(0).max(8),
+    maxSupply: UintStringSchema.optional(),
+    url: z.string().max(255).optional(),
+  })
+  .strict()
+  .superRefine(refineMaxSupply);
+
+/** Wiki `tokens.issue` — issuer only; `feeSymbol` becomes real once fees exist (step 3). */
+const TokenIssueParams = z
+  .object({
+    symbol: SymbolSchema,
+    to: AccountNameSchema,
+    quantity: QuantitySchema,
+    feeSymbol: z.string().min(1).max(10).optional(),
+  })
+  .strict();
+
+const TokenTransferParams = z
+  .object({ symbol: SymbolSchema, to: AccountNameSchema, quantity: QuantitySchema })
+  .strict();
+
+/** Engine extension (not on the wiki page): holder burns own tokens, supply decreases. */
+const TokenBurnParams = z.object({ symbol: SymbolSchema, quantity: QuantitySchema }).strict();
+
+/** Wiki: the new precision can only be greater than the current one (enforced in-VM). */
+const UpdatePrecisionParams = z
+  .object({ symbol: SymbolSchema, precision: z.number().int().min(0).max(8) })
+  .strict();
+
+const NFT_PARAM_SCHEMAS: Record<NftActionName, z.ZodTypeAny> = {
   create: CreateParams,
   updateUrl: UpdateUrlParams,
   updateMetadata: MetadataParams,
@@ -309,6 +399,26 @@ const PARAM_SCHEMAS: Record<ActionName, z.ZodTypeAny> = {
   cancelOrder: CancelOrderParams,
 };
 
+const TOKENS_PARAM_SCHEMAS: Record<TokenActionName, z.ZodTypeAny> = {
+  create: TokenCreateParams,
+  issue: TokenIssueParams,
+  transfer: TokenTransferParams,
+  burn: TokenBurnParams,
+  // Shared shapes with the `nft` contract (same wiki field requirements).
+  updateUrl: UpdateUrlParams,
+  updateMetadata: MetadataParams,
+  transferOwnership: TransferOwnershipParams,
+  updatePrecision: UpdatePrecisionParams,
+};
+
+const PARAM_SCHEMAS: {
+  nft: Record<NftActionName, z.ZodTypeAny>;
+  tokens: Record<TokenActionName, z.ZodTypeAny>;
+} = {
+  nft: NFT_PARAM_SCHEMAS,
+  tokens: TOKENS_PARAM_SCHEMAS,
+};
+
 export class PayloadError extends Error {
   constructor(
     readonly code: string,
@@ -320,6 +430,7 @@ export class PayloadError extends Error {
 }
 
 export interface Envelope {
+  contract: ContractName;
   action: ActionName;
   params: Record<string, unknown>;
 }
@@ -333,9 +444,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * Parses and fully validates a `custom_json` payload. Throws {@link PayloadError}.
  *
- * Accepts both the standard contract envelope and the engine shorthand; anything else
- * (including arrays of contract calls) is rejected with an explicit code so the sender
- * learns what to change.
+ * Accepts both the standard contract envelope (with `contractName` selecting `nft` or
+ * `tokens`) and the engine shorthand (optional `contract`, defaulting to `nft`);
+ * anything else — including arrays of contract calls or foreign contracts — is
+ * rejected with an explicit code so the sender learns what to change.
  */
 export function parseEnvelope(rawJson: string): Envelope {
   let parsed: unknown;
@@ -345,6 +457,7 @@ export function parseEnvelope(rawJson: string): Envelope {
     throw new PayloadError('INVALID_JSON', 'custom_json payload is not valid JSON');
   }
 
+  let contract: unknown;
   let action: unknown;
   let params: unknown;
 
@@ -364,21 +477,26 @@ export function parseEnvelope(rawJson: string): Envelope {
         `contract envelope is missing: ${missing.join(', ')}`,
       );
     }
-    if (parsed.contractName !== 'nft') {
-      throw new PayloadError(
-        'UNKNOWN_CONTRACT',
-        `only the "nft" contract is implemented (got ${JSON.stringify(parsed.contractName)})`,
-      );
-    }
+    contract = parsed.contractName;
     action = parsed.contractAction;
     params = parsed.contractPayload;
   } else if (isObject(parsed)) {
-    // ---- engine shorthand ----
+    // ---- engine shorthand (contract optional, `nft` for back-compatibility) ----
+    const explicit = (parsed as { contract?: unknown }).contract;
+    contract = explicit === undefined ? 'nft' : explicit;
     action = (parsed as { action?: unknown }).action;
     params = (parsed as { params?: unknown }).params;
   } else {
     throw new PayloadError('INVALID_ENVELOPE', 'payload must be an object');
   }
+
+  if (typeof contract !== 'string' || !(CONTRACTS as readonly string[]).includes(contract)) {
+    throw new PayloadError(
+      'UNKNOWN_CONTRACT',
+      `only the "nft" and "tokens" contracts are implemented (got ${JSON.stringify(contract)})`,
+    );
+  }
+  const name = contract as ContractName;
 
   if (typeof action !== 'string') {
     throw new PayloadError('INVALID_ENVELOPE', 'action (or contractAction) must be a string');
@@ -389,10 +507,11 @@ export function parseEnvelope(rawJson: string): Envelope {
     throw new PayloadError('ACTION_UNSUPPORTED', `action "${action}" is unsupported: ${hint}`);
   }
 
-  if (!(ACTIONS as readonly string[]).includes(action)) {
+  const allowed = ACTIONS_BY_CONTRACT[name];
+  if (!(allowed as readonly string[]).includes(action)) {
     throw new PayloadError(
       'INVALID_ENVELOPE',
-      `unknown action "${action}" (expected one of: ${ACTIONS.join(', ')})`,
+      `unknown action "${action}" for contract "${name}" (expected one of: ${allowed.join(', ')})`,
     );
   }
 
@@ -400,8 +519,10 @@ export function parseEnvelope(rawJson: string): Envelope {
     throw new PayloadError('INVALID_PARAMS', 'params (or contractPayload) must be an object');
   }
 
-  const name = action as ActionName;
-  const validated = PARAM_SCHEMAS[name].safeParse(params);
+  const actionName = action as ActionName;
+  const validated = (PARAM_SCHEMAS[name] as Record<ActionName, z.ZodTypeAny>)[actionName].safeParse(
+    params,
+  );
   if (!validated.success) {
     const issues = validated.error.issues
       .map((i) => `${i.path.length > 0 ? i.path.join('.') : '(root)'}: ${i.message}`)
@@ -409,8 +530,9 @@ export function parseEnvelope(rawJson: string): Envelope {
     throw new PayloadError('INVALID_PARAMS', issues);
   }
 
-  // Batch ceilings are structural (they bound work before the VM sees the payload).
-  if (name === 'transfer' || name === 'burn') {
+  // Batch ceilings are structural (they bound work before the VM sees the payload) —
+  // the `nft` transfer/burn batch shape (`nfts: [...]`) exists only on that contract.
+  if (name === 'nft' && (actionName === 'transfer' || actionName === 'burn')) {
     try {
       requireBatchLimit((validated.data as { nfts: z.infer<typeof NftGroups> }).nfts);
     } catch (err) {
@@ -418,35 +540,54 @@ export function parseEnvelope(rawJson: string): Envelope {
     }
   }
 
-  return { action: name, params: validated.data as Record<string, unknown> };
+  return { contract: name, action: actionName, params: validated.data as Record<string, unknown> };
 }
 
-/** Entities each action is allowed to mutate (defense-in-depth allow list). */
-export const ACTION_ENTITY_ALLOWLIST: Record<ActionName, readonly string[]> = {
-  create: ['collection', 'account'],
-  updateUrl: ['collection'],
-  updateMetadata: ['collection'],
-  updateName: ['collection'],
-  updateOrgName: ['collection'],
-  updateProductName: ['collection'],
-  addAuthorizedIssuingAccounts: ['collection'],
-  removeAuthorizedIssuingAccounts: ['collection'],
-  addAuthorizedIssuingContracts: ['collection'],
-  removeAuthorizedIssuingContracts: ['collection'],
-  transferOwnership: ['collection', 'account'],
-  addProperty: ['collection'],
-  setPropertyPermissions: ['collection'],
-  setProperties: ['instance'],
-  setGroupBy: ['collection'],
-  updatePropertyDefinition: ['collection'],
-  issue: ['collection', 'instance', 'account'],
-  issueMultiple: ['collection', 'instance', 'account'],
-  transfer: ['instance', 'account'],
-  burn: ['collection', 'instance'],
-  placeOrder: ['order', 'instance', 'account', 'meta'],
-  fillOrder: ['order', 'instance', 'account'],
-  cancelOrder: ['order', 'instance'],
-  // `meta` is only touched by counter increments, never by account/collection code paths.
+/**
+ * Entities each action is allowed to mutate (defense-in-depth allow list,
+ * scoped per contract — both contracts share several action names).
+ */
+export const ACTION_ENTITY_ALLOWLIST: {
+  nft: Record<NftActionName, readonly string[]>;
+  tokens: Record<TokenActionName, readonly string[]>;
+} = {
+  nft: {
+    create: ['collection', 'account'],
+    updateUrl: ['collection'],
+    updateMetadata: ['collection'],
+    updateName: ['collection'],
+    updateOrgName: ['collection'],
+    updateProductName: ['collection'],
+    addAuthorizedIssuingAccounts: ['collection'],
+    removeAuthorizedIssuingAccounts: ['collection'],
+    addAuthorizedIssuingContracts: ['collection'],
+    removeAuthorizedIssuingContracts: ['collection'],
+    transferOwnership: ['collection', 'account'],
+    addProperty: ['collection'],
+    setPropertyPermissions: ['collection'],
+    setProperties: ['instance'],
+    setGroupBy: ['collection'],
+    updatePropertyDefinition: ['collection'],
+    issue: ['collection', 'instance', 'account'],
+    issueMultiple: ['collection', 'instance', 'account'],
+    transfer: ['instance', 'account'],
+    burn: ['collection', 'instance'],
+    placeOrder: ['order', 'instance', 'account', 'meta'],
+    fillOrder: ['order', 'instance', 'account'],
+    cancelOrder: ['order', 'instance'],
+    // `meta` is only touched by counter increments, never by account/collection code paths.
+  },
+  tokens: {
+    create: ['token', 'account'],
+    issue: ['token', 'balance', 'account'],
+    transfer: ['balance', 'account'],
+    burn: ['token', 'balance'],
+    updateUrl: ['token'],
+    updateMetadata: ['token'],
+    transferOwnership: ['token', 'account'],
+    updatePrecision: ['token'],
+    // `param` is reserved for the fee engine (setParam) — no tokens action may touch it yet.
+  },
 };
 
 /** Hard ceiling on raw payload size (DoS protection before parsing). */

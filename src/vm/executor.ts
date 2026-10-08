@@ -116,10 +116,19 @@ export async function executeOp(args: ExecuteOpArgs): Promise<OpOutcome> {
   }
 
   const parsedOp = op as ParsedOp;
-  const snapshot: StateSnapshot = await buildSnapshot(store, parsedOp.action, parsedOp.params, parsedOp.auth);
+  // Ops built outside `parseBlock` (tests) may omit the field; absence = legacy `nft`.
+  const contract = parsedOp.contract ?? 'nft';
+  const snapshot: StateSnapshot = await buildSnapshot(
+    store,
+    contract,
+    parsedOp.action,
+    parsedOp.params,
+    parsedOp.auth,
+  );
 
   const context: ExecContext = {
     action: parsedOp.action,
+    contract,
     actor: parsedOp.auth.actor,
     auths: { active: parsedOp.auth.active, posting: parsedOp.auth.posting },
     blockHeight: block.height,
@@ -173,7 +182,7 @@ export async function executeOp(args: ExecuteOpArgs): Promise<OpOutcome> {
 
   let mutations: Mutation[];
   try {
-    mutations = validateMutations(parsedOp.action, response.mutations, snapshot);
+    mutations = validateMutations(contract, parsedOp.action, response.mutations, snapshot);
   } catch (err) {
     const guardError =
       err instanceof MutationGuardError

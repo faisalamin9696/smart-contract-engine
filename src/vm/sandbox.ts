@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as vm from 'node:vm';
+import type { ContractName } from '../types/actions';
 import type { EngineEvent, StateSnapshot } from '../types/domain';
 import { CONTRACT_SOURCE } from './contractSource';
 
@@ -18,6 +19,8 @@ import { CONTRACT_SOURCE } from './contractSource';
 
 export interface ExecContext {
   action: string;
+  /** Contract selected by the envelope; defaults to `nft` when absent (back-compat). */
+  contract?: ContractName;
   actor: string;
   auths: { active: string[]; posting: string[] };
   blockHeight: number;
@@ -148,6 +151,7 @@ interface IvmModule {
 function payloadFor(request: SandboxRequest): string {
   return JSON.stringify({
     action: request.context.action,
+    contract: request.context.contract === undefined ? 'nft' : request.context.contract,
     context: request.context,
     params: request.params,
     state: request.state,

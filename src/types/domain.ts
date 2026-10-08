@@ -168,7 +168,8 @@ export type Token = {
   precision: number;
   /** '0' means unlimited (wiki: omitted maxSupply). Decimal string, cap MAX_SAFE. */
   maxSupply: string;
-  /** Tokens ever issued — decimal string, monotonic (never decreases). */
+  /** Current fungible supply — rises on `issue`, falls on `burn`
+   *  (design doc: burn must decrease supply), decimal string honouring precision. */
   supply: string;
   /** Steem account that created the token (wiki `issuer`). */
   issuer: string;
@@ -278,6 +279,16 @@ export type EngineEventType =
   | 'ORDER_PLACED'
   | 'ORDER_FILLED'
   | 'ORDER_CANCELLED'
+  /** `tokens` contract: a fungible token was created. */
+  | 'TOKEN_CREATED'
+  /** `tokens` contract: supply increased and a holder was credited. */
+  | 'TOKEN_ISSUED'
+  /** `tokens` contract: balances moved between two holders. */
+  | 'TOKEN_TRANSFERRED'
+  /** `tokens` contract: a holder destroyed tokens; supply decreased. */
+  | 'TOKEN_BURNED'
+  /** `tokens` contract: url/metadata/issuer/precision updated (`data.field` says which). */
+  | 'TOKEN_UPDATED'
   /** One item of a batch action (wiki `issueMultiple`) failed while others succeeded. */
   | 'ITEM_FAILED'
   | 'TX_FAILED'

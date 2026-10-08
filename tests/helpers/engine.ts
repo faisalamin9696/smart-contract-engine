@@ -6,8 +6,9 @@ import { EngineEventBus } from '../../src/indexer/events';
 import type { BlockHeader, OpOutcome } from '../../src/vm/executor';
 import { executeOp } from '../../src/vm/executor';
 import { createSandbox, type Sandbox, type SandboxOptions } from '../../src/vm/sandbox';
-import { CollectionSchema, InstanceSchema, MarketOrderSchema } from '../../src/types/domain';
-import type { Collection, Instance, MarketOrder, Mutation } from '../../src/types/domain';
+import { BalanceSchema, CollectionSchema, InstanceSchema, MarketOrderSchema, TokenSchema } from '../../src/types/domain';
+import type { Balance, Collection, Instance, MarketOrder, Mutation, Token } from '../../src/types/domain';
+import type { ContractName } from '../../src/types/actions';
 
 export const DEFAULT_HEADER: BlockHeader = {
   height: 1,
@@ -49,10 +50,12 @@ export class TestEngine {
     params: Record<string, unknown>,
     auth: OpAuth,
     header: Partial<BlockHeader> = {},
+    contract: ContractName = 'nft',
   ): Promise<OpOutcome> {
     const hdr: BlockHeader = { ...DEFAULT_HEADER, ...header };
     const op = {
       ok: true,
+      contract,
       action,
       params,
       txId: `tx-${String(++this.txCounter).padStart(8, '0')}`,
@@ -76,10 +79,11 @@ export class TestEngine {
     params: Record<string, unknown>,
     auth: OpAuth,
     header: Partial<BlockHeader> = {},
+    contract: ContractName = 'nft',
   ): Promise<OpOutcome> {
-    const outcome = await this.exec(action, params, auth, header);
+    const outcome = await this.exec(action, params, auth, header, contract);
     if (!outcome.applied) {
-      throw new Error(`expected ${action} to apply but it failed: ${JSON.stringify(outcome.log.error)}`);
+      throw new Error(`expected ${contract}.${action} to apply but it failed: ${JSON.stringify(outcome.log.error)}`);
     }
     return outcome;
   }
@@ -89,10 +93,11 @@ export class TestEngine {
     params: Record<string, unknown>,
     auth: OpAuth,
     header: Partial<BlockHeader> = {},
+    contract: ContractName = 'nft',
   ): Promise<OpOutcome> {
-    const outcome = await this.exec(action, params, auth, header);
+    const outcome = await this.exec(action, params, auth, header, contract);
     if (outcome.applied) {
-      throw new Error(`expected ${action} to fail but it applied`);
+      throw new Error(`expected ${contract}.${action} to fail but it applied`);
     }
     return outcome;
   }
@@ -100,6 +105,18 @@ export class TestEngine {
   async collection(symbol: string): Promise<Collection | null> {
     const raw = await this.store.get('collection', symbol);
     return raw === null ? null : CollectionSchema.parse(raw);
+  }
+
+  /** Fungible token row (`tokens` contract), by symbol. */
+  async token(symbol: string): Promise<Token | null> {
+    const raw = await this.store.get('token', symbol);
+    return raw === null ? null : TokenSchema.parse(raw);
+  }
+
+  /** Holder row of the fungible `balance` table, keyed `<account>:<SYMBOL>`. */
+  async balance(account: string, symbol: string): Promise<Balance | null> {
+    const raw = await this.store.get('balance', `${account}:${symbol}`);
+    return raw === null ? null : BalanceSchema.parse(raw);
   }
 
   /**

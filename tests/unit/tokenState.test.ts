@@ -226,9 +226,9 @@ describe('journal + undo over the new partitions', () => {
   });
 });
 
-describe('guard: new partitions are write-protected until the tokens handlers land', () => {
-  it('no NFT action may mutate token/balance/param (contract-scoped allowlist comes later)', () => {
-    const cases: [EntityKind, Parameters<typeof validateMutations>[0]][] = [
+describe('guard: ledger partitions stay write-protected for `nft` actions', () => {
+  it('no NFT action may mutate token/balance/param (tokens actions get their own allow list)', () => {
+    const cases: [EntityKind, Parameters<typeof validateMutations>[1]][] = [
       ['token', 'create'],
       ['balance', 'transfer'],
       ['param', 'placeOrder'],
@@ -236,7 +236,7 @@ describe('guard: new partitions are write-protected until the tokens handlers la
     for (const [entity, action] of cases) {
       let caught: unknown;
       try {
-        validateMutations(action, [{ entity, key: 'x', value: {} }], emptySnapshot());
+        validateMutations('nft', action, [{ entity, key: 'x', value: {} }], emptySnapshot());
       } catch (err) {
         caught = err;
       }

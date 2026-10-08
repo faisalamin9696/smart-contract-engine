@@ -1,24 +1,26 @@
 import type { OpAuth } from '../chain/opParser';
-import type { ActionName } from '../types/actions';
-import { emptySnapshot, instanceKey, type StateSnapshot } from '../types/domain';
+import type { ActionName, ContractName } from '../types/actions';
+import { balanceKey, emptySnapshot, instanceKey, type StateSnapshot } from '../types/domain';
 import type { EngineStore } from './store';
 
 /**
  * Builds the minimal read-view the sandbox receives for one action.
  *
- * The prefetch list is derived from the *action + params + authorities* only (routing,
- * not business logic). Anything the contract reads but was not prefetched raises
- * `SNAPSHOT_MISS` inside the VM, and the guard refuses writes to unread keys — together
- * they make the read set explicit and auditable.
+ * The prefetch list is derived from the *contract + action + params + authorities* only
+ * (routing, not business logic). Anything the contract reads but was not prefetched
+ * raises `SNAPSHOT_MISS` inside the VM, and the guard refuses writes to unread keys —
+ * together they make the read set explicit and auditable.
  *
  * Two-phase resolution handles dependencies that are only known after a lookup
  * (e.g. an instance's collection symbol, an order's instance id).
  *
  * Note on ids: wiki token ids are only unique *per symbol*, so instance keys are the
- * composite `<SYMBOL>:<id>` everywhere (see {@link instanceKey}).
+ * composite `<SYMBOL>:<id>` everywhere (see {@link instanceKey}); fungible balances use
+ * `<account>:<SYMBOL>` (see {@link balanceKey}).
  */
 export async function buildSnapshot(
   store: EngineStore,
+  contract: ContractName,
   action: ActionName,
   params: Record<string, unknown>,
   auth: OpAuth,
@@ -45,69 +47,83 @@ export async function buildSnapshot(
     typeof v === 'object' && v !== null && !Array.isArray(v);
 
   // Generic routing shared by almost every action: a top-level `symbol` identifies the
-  // collection, a top-level `to` is an account the contract will ensure exists.
+  // collection/token, a top-level `to` is an account the contract will ensure exists.
   const symbol = str(params.symbol);
-  if (symbol) need.collection.add(symbol);
   const to = str(params.to);
-  if (to) need.account.add(to);
 
-  switch (action) {
-    case 'issue': {
-      // collection + `to` covered by the generic step.
-      break;
+  if (contract === 'tokens') {
+    // Fungible rows: the token definition plus the balance rows this action can move —
+    // the sender's own row (first active authority; issue/burn/transfer act on it) and
+    // the recipient's. Posting-only metadata actions never touch balances, and the
+    // extra keys cost only a `null` read when unused.
+    if (symbol) {
+      need.token.add(symbol);
+      const sender = auth.active[0];
+      if (sender) need.balance.add(balanceKey(sender, symbol));
+      if (to) need.balance.add(balanceKey(to, symbol));
     }
-    case 'issueMultiple': {
-      for (const item of arr(params.instances)) {
-        if (!isObject(item)) continue;
-        const itemSymbol = str(item.symbol);
-        if (itemSymbol) need.collection.add(itemSymbol);
-        const itemTo = str(item.to);
-        if (itemTo) need.account.add(itemTo);
+    if (to) need.account.add(to);
+  } else {
+    if (symbol) need.collection.add(symbol);
+    if (to) need.account.add(to);
+
+    switch (action) {
+      case 'issue': {
+        // collection + `to` covered by the generic step.
+        break;
       }
-      break;
-    }
-    case 'transfer':
-    case 'burn': {
-      // Wiki batch shape: nfts = [{ symbol, ids: [...] }]
-      for (const group of arr(params.nfts)) {
-        if (!isObject(group)) continue;
-        const groupSymbol = str(group.symbol);
-        if (groupSymbol) need.collection.add(groupSymbol);
-        for (const id of arr(group.ids)) {
-          const tokenId = str(id);
-          if (groupSymbol && tokenId) need.instance.add(instanceKey(groupSymbol, tokenId));
+      case 'issueMultiple': {
+        for (const item of arr(params.instances)) {
+          if (!isObject(item)) continue;
+          const itemSymbol = str(item.symbol);
+          if (itemSymbol) need.collection.add(itemSymbol);
+          const itemTo = str(item.to);
+          if (itemTo) need.account.add(itemTo);
         }
+        break;
       }
-      break;
-    }
-    case 'setProperties': {
-      if (!symbol) break;
-      for (const item of arr(params.nfts)) {
-        if (!isObject(item)) continue;
-        const id = str(item.id);
-        if (id) need.instance.add(instanceKey(symbol, id));
+      case 'transfer':
+      case 'burn': {
+        // Wiki batch shape: nfts = [{ symbol, ids: [...] }]
+        for (const group of arr(params.nfts)) {
+          if (!isObject(group)) continue;
+          const groupSymbol = str(group.symbol);
+          if (groupSymbol) need.collection.add(groupSymbol);
+          for (const id of arr(group.ids)) {
+            const tokenId = str(id);
+            if (groupSymbol && tokenId) need.instance.add(instanceKey(groupSymbol, tokenId));
+          }
+        }
+        break;
       }
-      break;
-    }
-    case 'placeOrder': {
-      const id = str(params.id);
-      if (symbol && id) need.instance.add(instanceKey(symbol, id));
-      need.meta.add('order_seq');
-      break;
-    }
-    case 'fillOrder':
-    case 'cancelOrder': {
-      const orderId = str(params.orderId);
-      if (orderId) need.order.add(orderId);
-      break;
-    }
-    default: {
-      // metadata / issuer-management / property-schema actions: collection (+ `to` for
-      // transferOwnership) already covered by the generic step above.
-      break;
+      case 'setProperties': {
+        if (!symbol) break;
+        for (const item of arr(params.nfts)) {
+          if (!isObject(item)) continue;
+          const id = str(item.id);
+          if (id) need.instance.add(instanceKey(symbol, id));
+        }
+        break;
+      }
+      case 'placeOrder': {
+        const id = str(params.id);
+        if (symbol && id) need.instance.add(instanceKey(symbol, id));
+        need.meta.add('order_seq');
+        break;
+      }
+      case 'fillOrder':
+      case 'cancelOrder': {
+        const orderId = str(params.orderId);
+        if (orderId) need.order.add(orderId);
+        break;
+      }
+      default: {
+        // metadata / issuer-management / property-schema actions: collection (+ `to` for
+        // transferOwnership) already covered by the generic step above.
+        break;
+      }
     }
   }
-  void action;
 
   // Phase 2: follow edges that are only resolvable after the first lookup.
   for (const orderId of [...need.order]) {

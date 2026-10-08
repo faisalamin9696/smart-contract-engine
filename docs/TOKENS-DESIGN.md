@@ -1,7 +1,8 @@
 # Tokens Contract — Design Brief (Phase 1)
 
-Status: **Phase 1 in progress** — build order step 1 (migration 0003 + store layer)
-done (2026-10-07)
+Status: **Phase 1 in progress** — build order steps 1–2 done (step 1: migration 0003 +
+store layer, 2026-10-07; step 2: contract-scoped dispatch, tokens handlers, guard
+conservation, 2026-10-08)
 Wiki source: https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md
 
 ## Goal
@@ -60,11 +61,16 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
 ## Key architectural decisions
 
 1. **Contract-scoped dispatch.** Both contracts share action names (`create`,
-   `transfer`, `updateUrl`, `updateMetadata`, `transferOwnership`).
+   `issue`, `transfer`, `burn`, `updateUrl`, `updateMetadata`,
+   `transferOwnership`).
    `contractSource.ts` `HANDLERS[action]` becomes `HANDLERS[contract][action]`;
    `types/actions.ts` `contractName !== 'nft'` becomes `∈ {nft, tokens}`
    (others still `UNKNOWN_CONTRACT`). One op id multiplexes both contracts —
-   same pattern as real Steem Engine.
+   same pattern as real Steem Engine. *(Implemented step 2: action lists,
+   zod param schemas and the guard's entity allow list are all keyed per
+   contract; snapshot prefetch routing branches on `contract`; the engine
+   shorthand envelope accepts an optional `contract` field, defaulting to
+   `nft` for back-compatibility.)*
 2. **`feeSymbol` becomes real.** Today accepted-and-ignored
    (`types/actions.ts:192`, mirrored in frontend `builder.ts:708`); once fees
    exist, `issue.feeSymbol` must be in `param.feeTokens` (wiki's
@@ -72,7 +78,9 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
 3. **Guard conservation invariant.** `vm/guard.ts` additionally asserts every
    state txn nets to **zero** across balances+treasury (transfer = −x/+x,
    fee = split, issue/burn = ±supply only). Makes ledger bugs structurally
-   impossible. Existing per-entity checks stay.
+   impossible. Existing per-entity checks stay. *(Implemented step 2:
+   `GUARD_CONSERVATION` + token invariants — initial supply 0, precision
+   increase-only, supply ≤ maxSupply, key↔row agreement, balance precision.)*
 4. **Fee unit = L2 SCE, not SBD.** Wiki charges ENG (platform L2 token) for
    the same reason: atomic in-VM debit, re-org undo covers it, no custody.
    A pegged-SBD bridge is a possible later phase (hot-wallet custody — own
@@ -91,9 +99,10 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
 ## Build order
 
 1. Migration `0003_tokens` (**additive** — no reset) + store layer
-   (`state/store.ts`, `memoryStore.ts`, `db/prismaStateStore.ts`)
+   (`state/store.ts`, `memoryStore.ts`, `db/prismaStateStore.ts`) — **done 2026-10-07**
 2. VM: contract-scoped dispatch + tokens handlers + guard conservation +
-   zod schemas in `types/actions.ts`
+   zod schemas in `types/actions.ts` — **done 2026-10-08** (`TOKEN_*` events are
+   emitted from step 2; their WS routing lands with step 5)
 3. Fee engine: `param` row, `requireFee()`, `setParam`, wire into NFT
    `create`/`addProperty`(4th+)/`issue`
 4. Settlement: `priceSymbol` + atomic `fillOrder`

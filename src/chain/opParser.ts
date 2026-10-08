@@ -1,4 +1,4 @@
-import { MAX_PAYLOAD_BYTES, parseEnvelope, PayloadError, type ActionName } from '../types/actions';
+import { MAX_PAYLOAD_BYTES, parseEnvelope, PayloadError, type ActionName, type ContractName } from '../types/actions';
 import type { JsonMap } from '../types/domain';
 import type { RawBlock } from './rpc';
 
@@ -19,6 +19,8 @@ export interface OpBase {
 
 export interface ParsedOp extends OpBase {
   ok: true;
+  /** Contract selected inside the envelope (`nft` | `tokens`) — dispatches the action. */
+  contract: ContractName;
   action: ActionName;
   params: Record<string, unknown>;
 }
@@ -111,7 +113,13 @@ export function parseBlock(block: RawBlock, opId: string): BlockParseResult {
       }
       try {
         const envelope = parseEnvelope(rawJson);
-        ops.push({ ...base, ok: true, action: envelope.action, params: envelope.params });
+        ops.push({
+          ...base,
+          ok: true,
+          contract: envelope.contract,
+          action: envelope.action,
+          params: envelope.params,
+        });
       } catch (err) {
         const pe = err instanceof PayloadError ? err : new PayloadError('INVALID_PAYLOAD', String(err));
         let action = 'unknown';

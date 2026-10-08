@@ -89,7 +89,7 @@ describe('custom_json block parser', () => {
 
   it('explains unsupported and foreign contracts explicitly', () => {
     const foreign = customJsonTx(
-      { contractName: 'tokens', contractAction: 'transfer', contractPayload: {} },
+      { contractName: 'tokensx', contractAction: 'transfer', contractPayload: {} },
       active('alice'),
     );
     const missingField = customJsonTx({ contractName: 'nft', contractAction: 'issue' }, active('alice'));
@@ -120,6 +120,87 @@ describe('custom_json block parser', () => {
       'ACTION_UNSUPPORTED',
     ]);
     expect((ops[4] as { message: string }).message).toContain('renamed to "issue"');
+  });
+
+  it('multiplexes the tokens contract over the same op id (standard + shorthand)', () => {
+    const standard = customJsonTx(
+      {
+        contractName: 'tokens',
+        contractAction: 'transfer',
+        contractPayload: { symbol: 'SCE', to: 'bob', quantity: '5' },
+      },
+      active('alice'),
+    );
+    const shorthand = customJsonTx(
+      // feeSymbol stays accepted (it becomes real with the fee engine, step 3).
+      { action: 'issue', params: { symbol: 'SCE', to: 'bob', quantity: '5', feeSymbol: 'SCE' }, contract: 'tokens' },
+      active('alice'),
+    );
+    const defaultNft = customJsonTx(
+      { action: 'transfer', params: { to: 'bob', nfts: [{ symbol: 'HERO', ids: ['1'] }] } },
+      active('alice'),
+    );
+
+    const block = buildBlock({
+      height: 3,
+      previous: 'f'.repeat(40),
+      transactions: [standard, shorthand, defaultNft],
+    });
+    const { ops } = parseBlock(block, 'steem_nft_v1');
+    expect(ops.map((o) => (o.ok ? `${o.contract}.${o.action}` : o.code))).toEqual([
+      'tokens.transfer',
+      'tokens.issue',
+      'nft.transfer',
+    ]);
+  });
+
+  it('resolves shared action names per contract and rejects foreign pairings', () => {
+    const tokensCreate = customJsonTx(
+      {
+        contractName: 'tokens',
+        contractAction: 'create',
+        contractPayload: { symbol: 'SCE', name: 'SteemCraft Engine', precision: 3 },
+      },
+      active('steempro.com'),
+    );
+    // `updatePrecision` exists only on `tokens` — not on `nft`.
+    const nftUpdatePrecision = customJsonTx(
+      { contractName: 'nft', contractAction: 'updatePrecision', contractPayload: { symbol: 'HERO' } },
+      active('alice'),
+    );
+    // `addProperty` exists only on `nft` — not on `tokens`.
+    const tokensAddProperty = customJsonTx(
+      { contractName: 'tokens', contractAction: 'addProperty', contractPayload: { symbol: 'SCE' } },
+      active('alice'),
+    );
+    // Shorthand without `contract` defaults to `nft`, so a tokens-shaped payload fails there.
+    const ambiguousShorthand = customJsonTx(
+      { action: 'create', params: { symbol: 'SCE', name: 'SteemCraft Engine', precision: 3 } },
+      active('alice'),
+    );
+    const badContractField = customJsonTx(
+      { action: 'create', params: { symbol: 'SCE', name: 'x', precision: 3 }, contract: 'market' },
+      active('alice'),
+    );
+
+    const block = buildBlock({
+      height: 4,
+      previous: 'f'.repeat(40),
+      transactions: [tokensCreate, nftUpdatePrecision, tokensAddProperty, ambiguousShorthand, badContractField],
+    });
+    const { ops } = parseBlock(block, 'steem_nft_v1');
+    expect(ops[0]).toMatchObject({
+      ok: true,
+      contract: 'tokens',
+      action: 'create',
+      params: { symbol: 'SCE', precision: 3 },
+    });
+    expect(ops[1]).toMatchObject({ ok: false, code: 'INVALID_ENVELOPE' });
+    expect((ops[1] as { message: string }).message).toContain('for contract "nft"');
+    expect(ops[2]).toMatchObject({ ok: false, code: 'INVALID_ENVELOPE' });
+    expect((ops[2] as { message: string }).message).toContain('for contract "tokens"');
+    expect(ops[3]).toMatchObject({ ok: false, code: 'INVALID_PARAMS' });
+    expect(ops[4]).toMatchObject({ ok: false, code: 'UNKNOWN_CONTRACT' });
   });
 
   it('flags oversized payloads before parsing them', () => {

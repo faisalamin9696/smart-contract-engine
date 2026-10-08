@@ -1,20 +1,30 @@
 /**
- * Deterministic NFT contract runtime.
+ * Deterministic contract runtime — both contracts in one sandboxed source.
  *
  * This source is executed **inside the sandbox** (isolated-vm isolate, or a fresh Node vm
  * context as fallback) with the exact same bytes in every environment, so the state
  * transition of a block is reproducible bit-for-bit.
  *
- * Action names, parameter shapes and semantics follow the Steem Engine `nft` contract
- * (https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md):
- * `create`, `issue`, `issueMultiple`, `transfer`, `burn`, `setProperties`, the metadata
- * and issuer-management actions, and the typed data-property schema
- * (`addProperty` / `setPropertyPermissions` / `setGroupBy` / `updatePropertyDefinition`).
- * The marketplace actions (`placeOrder` / `fillOrder` / `cancelOrder`) are an engine
- * extension; upstream they live in a separate `market` contract.
+ * Two contracts share this runtime and the single `steem_nft_v1` op id (the same
+ * multiplexing pattern as the real Steem Engine); `HANDLERS[contract][action]` picks
+ * the implementation from the contract selected by the envelope:
+ *
+ *  - **`nft`** — action names, parameter shapes and semantics follow the Steem Engine
+ *    `nft` contract (https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md):
+ *    `create`, `issue`, `issueMultiple`, `transfer`, `burn`, `setProperties`, the metadata
+ *    and issuer-management actions, and the typed data-property schema
+ *    (`addProperty` / `setPropertyPermissions` / `setGroupBy` / `updatePropertyDefinition`).
+ *    The marketplace actions (`placeOrder` / `fillOrder` / `cancelOrder`) are an engine
+ *    extension; upstream they live in a separate `market` contract.
+ *  - **`tokens`** — the fungible contract from .../Tokens-Contract.md (v1 scope of
+ *    docs/TOKENS-DESIGN.md): `create`, `issue`, `transfer`, `burn` (engine extension —
+ *    supply must decrease), `updateUrl` / `updateMetadata`, `transferOwnership` and
+ *    `updatePrecision` (increase only). Quantities are decimal strings handled with
+ *    BigNumber; balances are keyed `<account>:<SYMBOL>`.
  *
  * Deliberate deviations, all documented in the README:
- *  - no fees, no delegation, no locked tokens (state/entities this L2 does not model);
+ *  - no fees yet, no delegation, no staking, no locked tokens (state/entities this L2
+ *    does not model — the fee engine arrives with the `param` table wiring);
  *  - `number` data properties accept **integers only** (wiki floats break determinism);
  *  - ids are `<SYMBOL>:<id>` composite keys in storage because wiki ids are per-symbol.
  *
@@ -49,6 +59,7 @@ export const CONTRACT_SOURCE = `
   var RE_NAME = /^[A-Za-z0-9 ]{1,50}$/;
   var RE_PROP_NAME = /^[A-Za-z0-9]{1,25}$/;
   var RE_AMOUNT = /^[0-9]{1,15}([.][0-9]{1,3})?$/;
+  var RE_DECIMAL = /^[0-9]{1,15}([.][0-9]{1,8})?$/;
   var RE_INT_STRING = /^-?[0-9]{1,15}$/;
 
   var PROPERTY_TYPES = ['number', 'string', 'boolean'];
@@ -1063,32 +1074,363 @@ export const CONTRACT_SOURCE = `
     });
   }
 
+  // ------------------------------------------------------- fungible tokens contract
+  // Wiki Tokens-Contract (docs/TOKENS-DESIGN.md v1 scope). Quantities are decimal
+  // strings; all arithmetic goes through BigNumber. Rows live in the 'token' and
+  // 'balance' partitions (keys: symbol / <account>:<SYMBOL>).
+
+  function loadToken(S, symbol) {
+    if (typeof symbol !== 'string' || !RE_SYMBOL.test(symbol)) {
+      fail('BAD_SYMBOL', 'invalid token symbol: ' + String(symbol));
+    }
+    var token = read(S, 'token', symbol);
+    if (token === null) fail('TOKEN_NOT_FOUND', 'token ' + symbol + ' does not exist');
+    return token;
+  }
+
+  /** Holder row, synthesising a zero row when the account never received the token. */
+  function loadBalance(S, account, symbol) {
+    var balance = read(S, 'balance', account + ':' + symbol);
+    if (balance === null) return { account: account, symbol: symbol, quantity: '0' };
+    return balance;
+  }
+
+  /** Wiki quantities: decimal string, > 0, fractional digits <= the token's precision. */
+  function validateQuantity(token, value) {
+    if (typeof value !== 'string' || !RE_DECIMAL.test(value)) {
+      fail('BAD_QUANTITY', 'quantity must be a decimal string with at most 8 fractional digits');
+    }
+    var amount = new BigNumber(value);
+    if (!amount.gt(0)) fail('BAD_QUANTITY', 'quantity must be greater than zero');
+    if (amount.decimalPlaces() > token.precision) {
+      fail(
+        'PRECISION_EXCEEDED',
+        'token ' + token.symbol + ' has precision ' + token.precision + ' (got "' + value + '")'
+      );
+    }
+    return value;
+  }
+
+  function decAdd(a, b) {
+    return new BigNumber(a).plus(new BigNumber(b)).toFixed();
+  }
+
+  function decSub(a, b) {
+    return new BigNumber(a).minus(new BigNumber(b)).toFixed();
+  }
+
+  function requireUnderMaxSupply(token, quantity) {
+    if (token.maxSupply === '0') return;
+    var next = new BigNumber(token.supply).plus(quantity);
+    if (next.gt(new BigNumber(token.maxSupply))) {
+      fail('MAX_SUPPLY_REACHED', 'token ' + token.symbol + ' reached its max supply of ' + token.maxSupply);
+    }
+  }
+
+  /** Wiki: only the account that created the token may issue it. */
+  function requireTokenIssuer(ctx, token, action) {
+    for (var i = 0; i < ctx.auths.active.length; i++) {
+      if (ctx.auths.active[i] === token.issuer) return token.issuer;
+    }
+    fail('NOT_AUTHORIZED', 'only the issuer of ' + token.symbol + ' may ' + action);
+    return null;
+  }
+
+  /** Active authority is mandatory; the first active signer acts as the holder. */
+  function activeSender(ctx, action) {
+    if (ctx.auths.active.length === 0) {
+      fail('ACTIVE_AUTH_REQUIRED', action + ' requires active authority');
+    }
+    return ctx.auths.active[0];
+  }
+
+  function validRecipient(value, field) {
+    if (typeof value !== 'string' || !RE_ACCOUNT.test(value)) {
+      fail('BAD_ACCOUNT', field + ' is not a valid account name: ' + String(value));
+    }
+    if (value === 'null') {
+      fail('USE_BURN', 'tokens cannot be sent to null; use burn instead');
+    }
+    return value;
+  }
+
+  /** Owner-gated edit of a token row (level per action, mirroring editCollection). */
+  function editToken(S, M, ctx, symbol, action, level, mutate) {
+    var token = loadToken(S, symbol);
+    requireOwner(ctx, token, action, level);
+    var updated = copy(token);
+    mutate(updated, token);
+    write(S, M, 'token', token.symbol, updated);
+    return updated;
+  }
+
+  function tCreate(ctx, p, S, M, E) {
+    var creator = activeSender(ctx, 'create');
+    if (typeof p.symbol !== 'string' || !RE_SYMBOL.test(p.symbol)) {
+      fail('BAD_SYMBOL', 'symbol must be 3 to 10 uppercase letters');
+    }
+    validateName(p.name, 'name', RE_NAME);
+    if (typeof p.precision !== 'number' || !isFinite(p.precision) || Math.floor(p.precision) !== p.precision) {
+      fail('BAD_PRECISION', 'precision must be an integer between 0 and 8');
+    }
+    if (p.precision < 0 || p.precision > 8) {
+      fail('BAD_PRECISION', 'precision must be an integer between 0 and 8');
+    }
+    if (p.url !== undefined && (typeof p.url !== 'string' || p.url.length > 255)) {
+      fail('BAD_URL', 'url must be a string of at most 255 characters');
+    }
+    var maxSupply = '0';
+    if (p.maxSupply !== undefined) {
+      if (typeof p.maxSupply !== 'string' || !RE_UINT.test(p.maxSupply) || intGt(p.maxSupply, String(MAX_SAFE))) {
+        fail('BAD_MAX_SUPPLY', 'maxSupply must be an integer between 1 and ' + MAX_SAFE);
+      }
+      if (intLt(p.maxSupply, '1')) fail('BAD_MAX_SUPPLY', 'maxSupply must be at least 1');
+      maxSupply = p.maxSupply;
+    }
+    if (read(S, 'token', p.symbol) !== null) {
+      fail('TOKEN_EXISTS', 'token ' + p.symbol + ' already exists');
+    }
+
+    var token = {
+      symbol: p.symbol,
+      name: p.name,
+      precision: p.precision,
+      maxSupply: maxSupply,
+      supply: '0',
+      issuer: creator,
+      url: p.url === undefined ? '' : p.url,
+      metadata: '',
+      createdAtBlock: ctx.blockHeight,
+      createdAt: ctx.timestamp,
+    };
+    write(S, M, 'token', p.symbol, token);
+    ensureAccount(S, M, ctx, creator);
+    emit(E, 'TOKEN_CREATED', ctx, { symbol: p.symbol, account: creator });
+    return token;
+  }
+
+  function tIssue(ctx, p, S, M, E) {
+    var token = loadToken(S, p.symbol);
+    requireTokenIssuer(ctx, token, 'issue');
+    validRecipient(p.to, 'to');
+    var quantity = validateQuantity(token, p.quantity);
+    requireUnderMaxSupply(token, quantity);
+
+    var balance = loadBalance(S, p.to, token.symbol);
+    var credited = {
+      account: p.to,
+      symbol: token.symbol,
+      quantity: decAdd(balance.quantity, quantity),
+    };
+    write(S, M, 'balance', p.to + ':' + token.symbol, credited);
+
+    var updated = copy(token);
+    updated.supply = decAdd(token.supply, quantity);
+    write(S, M, 'token', token.symbol, updated);
+
+    ensureAccount(S, M, ctx, p.to);
+    emit(E, 'TOKEN_ISSUED', ctx, {
+      symbol: token.symbol,
+      account: p.to,
+      data: { quantity: quantity, issuer: token.issuer },
+    });
+    return credited;
+  }
+
+  function tTransfer(ctx, p, S, M, E) {
+    var from = activeSender(ctx, 'transfer');
+    validRecipient(p.to, 'to');
+    if (from === p.to) fail('SAME_ACCOUNT', 'sender and recipient are the same account: ' + from);
+    var token = loadToken(S, p.symbol);
+    var quantity = validateQuantity(token, p.quantity);
+
+    var senderBalance = loadBalance(S, from, token.symbol);
+    if (new BigNumber(senderBalance.quantity).lt(quantity)) {
+      fail(
+        'INSUFFICIENT_BALANCE',
+        from + ' has ' + senderBalance.quantity + ' ' + token.symbol + ' but tried to transfer ' + quantity
+      );
+    }
+    write(S, M, 'balance', from + ':' + token.symbol, {
+      account: from,
+      symbol: token.symbol,
+      quantity: decSub(senderBalance.quantity, quantity),
+    });
+
+    var recipientBalance = loadBalance(S, p.to, token.symbol);
+    var credited = {
+      account: p.to,
+      symbol: token.symbol,
+      quantity: decAdd(recipientBalance.quantity, quantity),
+    };
+    write(S, M, 'balance', p.to + ':' + token.symbol, credited);
+
+    ensureAccount(S, M, ctx, p.to);
+    emit(E, 'TOKEN_TRANSFERRED', ctx, {
+      symbol: token.symbol,
+      account: p.to,
+      data: { from: from, quantity: quantity },
+    });
+    return credited;
+  }
+
+  function tBurn(ctx, p, S, M, E) {
+    var holder = activeSender(ctx, 'burn');
+    var token = loadToken(S, p.symbol);
+    var quantity = validateQuantity(token, p.quantity);
+
+    var balance = loadBalance(S, holder, token.symbol);
+    if (new BigNumber(balance.quantity).lt(quantity)) {
+      fail(
+        'INSUFFICIENT_BALANCE',
+        holder + ' has ' + balance.quantity + ' ' + token.symbol + ' but tried to burn ' + quantity
+      );
+    }
+    write(S, M, 'balance', holder + ':' + token.symbol, {
+      account: holder,
+      symbol: token.symbol,
+      quantity: decSub(balance.quantity, quantity),
+    });
+
+    if (new BigNumber(token.supply).lt(quantity)) {
+      fail(
+        'SUPPLY_UNDERFLOW',
+        'token ' + token.symbol + ' supply ' + token.supply + ' is below the burn amount ' + quantity
+      );
+    }
+    var updated = copy(token);
+    updated.supply = decSub(token.supply, quantity);
+    write(S, M, 'token', token.symbol, updated);
+
+    emit(E, 'TOKEN_BURNED', ctx, {
+      symbol: token.symbol,
+      account: holder,
+      data: { quantity: quantity },
+    });
+    return updated;
+  }
+
+  function tUpdateUrl(ctx, p, S, M, E) {
+    if (typeof p.url !== 'string' || p.url.length > 255) {
+      fail('BAD_URL', 'url must be a string of at most 255 characters');
+    }
+    var token = editToken(S, M, ctx, p.symbol, 'updateUrl', 'either', function (updated) {
+      updated.url = p.url;
+    });
+    emit(E, 'TOKEN_UPDATED', ctx, {
+      symbol: token.symbol,
+      account: token.issuer,
+      data: { field: 'url', url: token.url },
+    });
+    return token;
+  }
+
+  function tUpdateMetadata(ctx, p, S, M, E) {
+    if (!isObject(p.metadata)) fail('BAD_METADATA', 'metadata must be an object');
+    assertNoFloats(p.metadata, 'metadata');
+    var encoded = JSON.stringify(p.metadata);
+    if (encoded.length > MAX_METADATA_CHARS) {
+      fail('METADATA_TOO_LARGE', 'metadata must stringify to at most ' + MAX_METADATA_CHARS + ' characters');
+    }
+    var token = editToken(S, M, ctx, p.symbol, 'updateMetadata', 'either', function (updated) {
+      updated.metadata = encoded;
+    });
+    emit(E, 'TOKEN_UPDATED', ctx, {
+      symbol: token.symbol,
+      account: token.issuer,
+      data: { field: 'metadata' },
+    });
+    return token;
+  }
+
+  function tTransferOwnership(ctx, p, S, M, E) {
+    if (typeof p.to !== 'string' || !RE_ACCOUNT.test(p.to)) {
+      fail('BAD_ACCOUNT', 'new owner is not a valid account name');
+    }
+    var token = loadToken(S, p.symbol);
+    requireOwner(ctx, token, 'transferOwnership', 'active');
+    if (p.to === token.issuer) fail('SAME_OWNER', 'token is already owned by ' + p.to);
+    var updated = copy(token);
+    updated.issuer = p.to;
+    write(S, M, 'token', token.symbol, updated);
+    ensureAccount(S, M, ctx, p.to);
+    emit(E, 'TOKEN_UPDATED', ctx, {
+      symbol: token.symbol,
+      account: p.to,
+      data: { field: 'issuer', from: token.issuer },
+    });
+    return updated;
+  }
+
+  function tUpdatePrecision(ctx, p, S, M, E) {
+    var token = loadToken(S, p.symbol);
+    requireOwner(ctx, token, 'updatePrecision', 'active');
+    if (
+      typeof p.precision !== 'number' ||
+      !isFinite(p.precision) ||
+      Math.floor(p.precision) !== p.precision ||
+      p.precision < 0 ||
+      p.precision > 8
+    ) {
+      fail('BAD_PRECISION', 'precision must be an integer between 0 and 8');
+    }
+    if (p.precision <= token.precision) {
+      fail(
+        'PRECISION_NOT_INCREASED',
+        'precision of ' + token.symbol + ' can only be increased (current: ' + token.precision + ')'
+      );
+    }
+    var updated = copy(token);
+    updated.precision = p.precision;
+    write(S, M, 'token', token.symbol, updated);
+    emit(E, 'TOKEN_UPDATED', ctx, {
+      symbol: token.symbol,
+      account: token.issuer,
+      data: { field: 'precision', precision: updated.precision },
+    });
+    return updated;
+  }
+
   // ------------------------------------------------------------------ dispatch
 
+  // Contract-scoped dispatch: both contracts share several action names, so the
+  // envelope's contract selects the table (mirrors real Steem Engine multiplexing).
   var HANDLERS = {
-    create: hCreate,
-    updateUrl: hUpdateUrl,
-    updateMetadata: hUpdateMetadata,
-    updateName: hUpdateName,
-    updateOrgName: hUpdateOrgName,
-    updateProductName: hUpdateProductName,
-    addAuthorizedIssuingAccounts: hAddAuthorizedIssuingAccounts,
-    removeAuthorizedIssuingAccounts: hRemoveAuthorizedIssuingAccounts,
-    addAuthorizedIssuingContracts: hAddAuthorizedIssuingContracts,
-    removeAuthorizedIssuingContracts: hRemoveAuthorizedIssuingContracts,
-    transferOwnership: hTransferOwnership,
-    addProperty: hAddProperty,
-    setPropertyPermissions: hSetPropertyPermissions,
-    setProperties: hSetProperties,
-    setGroupBy: hSetGroupBy,
-    updatePropertyDefinition: hUpdatePropertyDefinition,
-    issue: hIssue,
-    issueMultiple: hIssueMultiple,
-    transfer: hTransfer,
-    burn: hBurn,
-    placeOrder: hPlaceOrder,
-    fillOrder: hFillOrder,
-    cancelOrder: hCancelOrder,
+    nft: {
+      create: hCreate,
+      updateUrl: hUpdateUrl,
+      updateMetadata: hUpdateMetadata,
+      updateName: hUpdateName,
+      updateOrgName: hUpdateOrgName,
+      updateProductName: hUpdateProductName,
+      addAuthorizedIssuingAccounts: hAddAuthorizedIssuingAccounts,
+      removeAuthorizedIssuingAccounts: hRemoveAuthorizedIssuingAccounts,
+      addAuthorizedIssuingContracts: hAddAuthorizedIssuingContracts,
+      removeAuthorizedIssuingContracts: hRemoveAuthorizedIssuingContracts,
+      transferOwnership: hTransferOwnership,
+      addProperty: hAddProperty,
+      setPropertyPermissions: hSetPropertyPermissions,
+      setProperties: hSetProperties,
+      setGroupBy: hSetGroupBy,
+      updatePropertyDefinition: hUpdatePropertyDefinition,
+      issue: hIssue,
+      issueMultiple: hIssueMultiple,
+      transfer: hTransfer,
+      burn: hBurn,
+      placeOrder: hPlaceOrder,
+      fillOrder: hFillOrder,
+      cancelOrder: hCancelOrder,
+    },
+    tokens: {
+      create: tCreate,
+      issue: tIssue,
+      transfer: tTransfer,
+      burn: tBurn,
+      updateUrl: tUpdateUrl,
+      updateMetadata: tUpdateMetadata,
+      transferOwnership: tTransferOwnership,
+      updatePrecision: tUpdatePrecision,
+    },
   };
 
   function run(request) {
@@ -1099,8 +1441,20 @@ export const CONTRACT_SOURCE = `
     if (!isObject(ctx) || typeof ctx.blockHeight !== 'number') {
       fail('BAD_CONTEXT', 'execution context is missing');
     }
-    var handler = HANDLERS[request.action];
-    if (typeof handler !== 'function') fail('UNKNOWN_ACTION', 'unknown action: ' + String(request.action));
+    // The contract comes from the envelope (validated by the host); a missing value is
+    // the legacy engine shorthand, which has always addressed the 'nft' contract.
+    var contract = request.contract === undefined ? 'nft' : request.contract;
+    if (typeof contract !== 'string' || !has(HANDLERS, contract)) {
+      fail('UNKNOWN_CONTRACT', 'unknown contract: ' + String(contract));
+    }
+    var table = HANDLERS[contract];
+    if (typeof request.action !== 'string' || !has(table, request.action)) {
+      fail('UNKNOWN_ACTION', 'unknown action: ' + String(request.action) + ' for contract ' + contract);
+    }
+    var handler = table[request.action];
+    if (typeof handler !== 'function') {
+      fail('UNKNOWN_ACTION', 'action ' + request.action + ' of contract ' + contract + ' is not executable');
+    }
     var mutations = [];
     var events = [];
     handler(ctx, request.params, S, mutations, events);

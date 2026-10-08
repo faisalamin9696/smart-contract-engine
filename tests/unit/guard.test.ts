@@ -93,7 +93,7 @@ function expectGuardError(fn: () => unknown, code: string): void {
 
 describe('mutation guard', () => {
   it('accepts legitimate mutations', () => {
-    const out = validateMutations(
+    const out = validateMutations('nft', 
       'transfer',
       [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, owner: 'bob', previousAccount: 'alice' } }],
       snapshot(),
@@ -105,7 +105,7 @@ describe('mutation guard', () => {
   it('rejects entities outside the action allow list', () => {
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'transfer',
           [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, supply: '99' } }],
           snapshot(),
@@ -117,7 +117,7 @@ describe('mutation guard', () => {
   it('rejects modifications of immutable fields', () => {
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setProperties',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, seq: 99 } }],
           snapshot(),
@@ -126,7 +126,7 @@ describe('mutation guard', () => {
     );
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'issue',
           [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, maxSupply: '99' } }],
           snapshot(),
@@ -135,7 +135,7 @@ describe('mutation guard', () => {
     );
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'issue',
           [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, symbol: 'HEROES' } }],
           snapshot(),
@@ -145,13 +145,13 @@ describe('mutation guard', () => {
   });
 
   it('allows the wiki-editable collection fields (name/issuer/metadata/issuers)', () => {
-    const out = validateMutations(
+    const out = validateMutations('nft', 
       'updateName',
       [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, name: 'New Name' } }],
       snapshot(),
     );
     expect(out).toHaveLength(1);
-    const ownership = validateMutations(
+    const ownership = validateMutations('nft', 
       'transferOwnership',
       [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, issuer: 'bob' } }],
       snapshot(),
@@ -162,7 +162,7 @@ describe('mutation guard', () => {
   it('rejects schema violations in after-images', () => {
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'transfer',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, owner: 'NotAnAccount' } }],
           snapshot(),
@@ -171,7 +171,7 @@ describe('mutation guard', () => {
     );
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setProperties',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, properties: { xp: 1.5 } } }],
           snapshot(),
@@ -184,7 +184,7 @@ describe('mutation guard', () => {
     // undeclared property
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setProperties',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, properties: { mystery: 1 } } }],
           snapshot(),
@@ -194,7 +194,7 @@ describe('mutation guard', () => {
     // wrong declared type (serial is a string)
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setProperties',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, properties: { serial: 42 } } }],
           snapshot(),
@@ -204,7 +204,7 @@ describe('mutation guard', () => {
     // number property must hold an integer
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setProperties',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, properties: { xp: 'lots' } } }],
           snapshot(),
@@ -215,7 +215,7 @@ describe('mutation guard', () => {
     const withSerial: Instance = { ...INSTANCE, properties: { xp: 10, serial: 'A-1' } };
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setProperties',
           [{ entity: 'instance', key: 'HERO:1', value: { ...withSerial, properties: { xp: 10, serial: 'A-2' } } }],
           { ...snapshot(), instance: { 'HERO:1': withSerial } },
@@ -224,7 +224,7 @@ describe('mutation guard', () => {
     );
     // the same value twice is a harmless no-op
     expect(
-      validateMutations(
+      validateMutations('nft', 
         'setProperties',
         [{ entity: 'instance', key: 'HERO:1', value: withSerial }],
         { ...snapshot(), instance: { 'HERO:1': withSerial } },
@@ -235,7 +235,7 @@ describe('mutation guard', () => {
   it('requires a transfer to record the previous holder', () => {
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'transfer',
           [{ entity: 'instance', key: 'HERO:1', value: { ...INSTANCE, owner: 'bob', previousAccount: null } }],
           snapshot(),
@@ -246,16 +246,16 @@ describe('mutation guard', () => {
 
   it('only allows destroying instances', () => {
     expectGuardError(
-      () => validateMutations('cancelOrder', [{ entity: 'order', key: 'ORD-00000001', value: null }], snapshot()),
+      () => validateMutations('nft', 'cancelOrder', [{ entity: 'order', key: 'ORD-00000001', value: null }], snapshot()),
       'GUARD_DELETE_DENIED',
     );
     expectGuardError(
-      () => validateMutations('burn', [{ entity: 'instance', key: 'OTHER:1', value: null }], snapshot()),
+      () => validateMutations('nft', 'burn', [{ entity: 'instance', key: 'OTHER:1', value: null }], snapshot()),
       'GUARD_DELETE_UNREAD',
     );
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'burn',
           [{ entity: 'instance', key: 'HERO:2', value: null }],
           { ...snapshot(), instance: { ...snapshot().instance, 'HERO:2': null } },
@@ -263,7 +263,7 @@ describe('mutation guard', () => {
       'GUARD_DELETE_ABSENT',
     );
     // a real burn of a read instance is accepted
-    expect(validateMutations('burn', [{ entity: 'instance', key: 'HERO:1', value: null }], snapshot())).toHaveLength(
+    expect(validateMutations('nft', 'burn', [{ entity: 'instance', key: 'HERO:1', value: null }], snapshot())).toHaveLength(
       1,
     );
   });
@@ -272,7 +272,7 @@ describe('mutation guard', () => {
     // supply = tokens ever issued: it may never decrease (ids would be recycled)
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'issue',
           [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, supply: '4' } }],
           snapshot(),
@@ -283,7 +283,7 @@ describe('mutation guard', () => {
     const alreadyBurnt: Collection = { ...COLLECTION, burned: '2', circulatingSupply: '3' };
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'burn',
           [{ entity: 'collection', key: 'HERO', value: { ...alreadyBurnt, burned: '1', circulatingSupply: '4' } }],
           { ...snapshot(), collection: { HERO: alreadyBurnt } },
@@ -293,7 +293,7 @@ describe('mutation guard', () => {
     // circulatingSupply must equal supply - burned
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'burn',
           [
             {
@@ -307,14 +307,14 @@ describe('mutation guard', () => {
       'GUARD_SUPPLY_INVARIANT',
     );
     // a proper burn keeps every counter in step
-    const burnt = validateMutations(
+    const burnt = validateMutations('nft', 
       'burn',
       [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, burned: '1', circulatingSupply: '4' } }],
       snapshot(),
     );
     expect(burnt).toHaveLength(1);
     // issuance increments all three
-    const issued = validateMutations(
+    const issued = validateMutations('nft', 
       'issue',
       [
         {
@@ -332,7 +332,7 @@ describe('mutation guard', () => {
     const grouped: Collection = { ...COLLECTION, groupBy: ['xp'] };
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'setGroupBy',
           [{ entity: 'collection', key: 'HERO', value: { ...grouped, groupBy: ['serial'] } }],
           { ...snapshot(), collection: { HERO: grouped } },
@@ -340,7 +340,7 @@ describe('mutation guard', () => {
       'GUARD_GROUP_BY_IMMUTABLE',
     );
     expect(
-      validateMutations(
+      validateMutations('nft', 
         'setGroupBy',
         [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, groupBy: ['xp'] } }],
         snapshot(),
@@ -352,7 +352,7 @@ describe('mutation guard', () => {
     delete withoutXp.xp;
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'updatePropertyDefinition',
           [{ entity: 'collection', key: 'HERO', value: { ...COLLECTION, properties: withoutXp } }],
           snapshot(),
@@ -361,7 +361,7 @@ describe('mutation guard', () => {
     );
     const virgin: Collection = { ...COLLECTION, supply: '0', circulatingSupply: '0' };
     expect(
-      validateMutations(
+      validateMutations('nft', 
         'updatePropertyDefinition',
         [{ entity: 'collection', key: 'HERO', value: { ...virgin, properties: withoutXp } }],
         { ...snapshot(), collection: { HERO: virgin } },
@@ -373,7 +373,7 @@ describe('mutation guard', () => {
     const filled: MarketOrder = { ...ORDER, status: 'FILLED', fillBy: 'bob', filledAtBlock: 3 };
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'fillOrder',
           [{ entity: 'order', key: 'ORD-00000001', value: { ...filled, status: 'OPEN', fillBy: null } }],
           { ...snapshot(), order: { 'ORD-00000001': filled } },
@@ -382,7 +382,7 @@ describe('mutation guard', () => {
     );
     expectGuardError(
       () =>
-        validateMutations(
+        validateMutations('nft', 
           'cancelOrder',
           [{ entity: 'order', key: 'ORD-00000001', value: { ...filled, status: 'CANCELLED' } }],
           { ...snapshot(), order: { 'ORD-00000001': filled } },
@@ -397,6 +397,6 @@ describe('mutation guard', () => {
       key: 'HERO:1',
       value: INSTANCE,
     }));
-    expectGuardError(() => validateMutations('setProperties', many, snapshot()), 'GUARD_TOO_MANY_MUTATIONS');
+    expectGuardError(() => validateMutations('nft', 'setProperties', many, snapshot()), 'GUARD_TOO_MANY_MUTATIONS');
   });
 });

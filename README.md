@@ -31,12 +31,12 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 | Block ingestion | sequential ~3s polling against a rotating endpoint list with timeouts, cooldowns and exponential back-off (`src/chain/rpc.ts`, `src/chain/blockStreamer.ts`) |
 | Operation filtering | only `custom_json` ops with `id = steem_nft_v1`; malformed/oversized payloads are logged as `IGNORED` without failing the block (`src/chain/opParser.ts`) |
 | Re-org handling | previous-hash linkage check + tip re-check while idle, rolling 30-block undo/redo buffer, automatic rollback & re-apply, hard stop beyond buffer depth (`src/chain/reorg.ts`) |
-| Execution | one compiled contract, run in an `isolated-vm` V8 isolate (falls back to Node `vm` with the identical source); hard timeout, memory limit, blocked globals (`src/vm/`) |
+| Execution | one compiled contract source carrying both contracts (`nft` + `tokens`, dispatched per envelope), run in an `isolated-vm` V8 isolate (falls back to Node `vm` with the identical source); hard timeout, memory limit, blocked globals (`src/vm/`) |
 | Determinism | `bignumber.js` only — integers/decimal strings, **no floating point anywhere**, frozen BigNumber config on both host and guest, canonical JSON (`src/utils/bn.ts`, `src/utils/canonical.ts`) |
-| State integrity | sandbox returns *declarative mutations*; the host re-validates schema, entity allowlist, immutable fields, read-set integrity (unread-write / stale-read guards), supply/burn/groupBy invariants, typed property rules and order finality (`src/vm/guard.ts`) |
+| State integrity | sandbox returns *declarative mutations*; the host re-validates schema, entity allowlist (per contract), immutable fields, read-set integrity (unread-write / stale-read guards), supply/burn/groupBy invariants, fungible token invariants + the ledger **conservation invariant** (balance deltas must equal the supply delta per op), typed property rules and order finality (`src/vm/guard.ts`) |
 | Atomicity | one DB transaction per block: state + journal + logs + cursor commit together; advisory lock (`pg_advisory_xact_lock`) serialises block processing across replicas |
 | APIs | REST + GraphQL (Apollo Server 5) + WebSocket channels |
-| Tests | 85 tests across 11 suites (deterministic execution, wiki action semantics, guards, journal, marketplace, parser) + integration suites for micro-fork rollbacks, the API surface, and an opt-in Postgres parity suite |
+| Tests | 128 tests across 14 suites (deterministic execution, wiki action semantics for both contracts, guards, journal, marketplace, parser) + integration suites for micro-fork rollbacks, the API surface, and an opt-in Postgres parity suite |
 
 ## Quick start
 
@@ -169,26 +169,37 @@ rejected with `{"type":"error","message":...}`.
 
 Event types: `BLOCK_APPLIED`, `COLLECTION_CREATED`, `NFT_MINTED`, `NFT_RECEIVED`,
 `NFT_TRANSFERRED`, `PROPERTIES_UPDATED`, `NFT_BURNED`, `ORDER_PLACED`, `ORDER_FILLED`,
-`ORDER_CANCELLED`, `ITEM_FAILED`, `TX_FAILED`, `REORG_DETECTED`, `REORG_APPLIED`,
-`ENGINE_HALTED`.
+`ORDER_CANCELLED`, `TOKEN_CREATED`, `TOKEN_ISSUED`, `TOKEN_TRANSFERRED`,
+`TOKEN_BURNED`, `TOKEN_UPDATED`, `ITEM_FAILED`, `TX_FAILED`, `REORG_DETECTED`,
+`REORG_APPLIED`, `ENGINE_HALTED`.
 
 ## Writing to the engine
 
-The contract interface follows the standard Steem Engine **`nft`** contract
-([NFT-Contracts wiki](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md)).
+Two contracts share this engine's op id (the same multiplexing pattern as the real
+Steem Engine): the standard **`nft`** contract
+([NFT-Contracts wiki](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md))
+and the fungible **`tokens`** contract
+([Tokens-Contract wiki](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md),
+v1 scope of [docs/TOKENS-DESIGN.md](docs/TOKENS-DESIGN.md)).
 Every action is a Steem `custom_json` operation with `id = steem_nft_v1`, accepted in
 either envelope shape:
 
 ```jsonc
-// engine shorthand
+// engine shorthand (contract optional — defaults to "nft")
 {"action": "issue", "params": {"symbol": "DRAGON", "to": "bob"}}
 
-// standard steemsmartcontracts envelope (only contractName "nft" is recognised)
+// standard steemsmartcontracts envelope (contractName "nft" or "tokens")
 {"contractName": "nft", "contractAction": "issue",
  "contractPayload": {"symbol": "DRAGON", "to": "bob"}}
+
+// the same shape addresses the fungible contract
+{"contractName": "tokens", "contractAction": "transfer",
+ "contractPayload": {"symbol": "SCE", "to": "bob", "quantity": "5"}}
 ```
 
 Amounts are decimal strings, supplies and prices are strings; **no floats anywhere**.
+
+### `nft` contract actions
 
 | Action | Params | Authority |
 | --- | --- | --- |
@@ -209,6 +220,23 @@ Amounts are decimal strings, supplies and prices are strings; **no floats anywhe
 | `fillOrder` | `orderId` — *engine extension* | active of the buyer (not the seller) |
 | `cancelOrder` | `orderId` — *engine extension* | active of the seller |
 
+### `tokens` contract actions (fungible)
+
+| Action | Params | Authority |
+| --- | --- | --- |
+| `create` | `symbol, name, precision (0–8, required), maxSupply?, url?` — fee scheduled for 20 SCE (step 3) | active of the creator (becomes `issuer`) |
+| `issue` | `symbol, to, quantity, feeSymbol?` — issuer only; honours `maxSupply` and precision | active of the `issuer` |
+| `transfer` | `symbol, to, quantity` | active of the holder (posting is not enough) |
+| `burn` | `symbol, quantity` — *engine extension*, decreases `supply` | active of the holder |
+| `updateUrl` / `updateMetadata` | `symbol` + the new field (`metadata` is a JSON object, stringified ≤ 1000 chars in state) | owner (active **or** posting) |
+| `transferOwnership` | `symbol, to` | active of the `issuer` |
+| `updatePrecision` | `symbol, precision` — increase only | active of the `issuer` |
+
+Shared action names resolve per `contractName`; every op is additionally checked by the
+host guard, which enforces the **ledger conservation invariant**: within one op the sum
+of all balance deltas per symbol must equal that token's `supply` delta (transfers and
+fees net to zero; only `issue`/`burn` change supply).
+
 Rules worth knowing:
 
 * **token ids are wiki-style numeric strings scoped to the symbol** — a token is
@@ -226,14 +254,20 @@ Rules worth knowing:
 * royalties are snapshotted onto the order at placement time, rounded **down**, the
   remainder goes to the seller;
 * legacy names (`createCollection`, `mint`, `batchMint`, `updateProperties`) and the
-  delegation actions are rejected with an explicit `ACTION_UNSUPPORTED` hint, and
+  delegation/staking actions are rejected with an explicit `ACTION_UNSUPPORTED` hint, and
   foreign `contractName`s with `UNKNOWN_CONTRACT`;
+* fungible `tokens` rules: quantities are decimal strings capped by the token's
+  `precision` (increase-only via `updatePrecision`), the first active signer is the
+  sender of `transfer`/`burn`, self-transfers and `null` recipients are refused, and a
+  new token always starts at `supply = "0"`;
 * actions that fail validation are recorded in the transaction log with a
   machine-readable error code and never abort the block.
 
-Not implemented (per the wiki's optional sections): delegation / locked tokens and the
-ENG fee schedule. The marketplace actions above are an engine extension — upstream they
-live in a separate `market` contract.
+Not implemented (per the wiki's optional sections and
+[docs/TOKENS-DESIGN.md](docs/TOKENS-DESIGN.md) deferrals): delegation / staking,
+`transferToContract`, locked tokens, and the fee schedule (fees are wired in build-order
+step 3). The marketplace actions above are an engine extension — upstream they live in a
+separate `market` contract.
 
 ## Determinism contract
 

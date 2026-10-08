@@ -168,6 +168,7 @@ export function parsedOp(
 ): ParsedOp {
   return {
     ok: true,
+    contract: 'nft',
     action: action as ParsedOp['action'],
     params,
     txId: overrides.txId ?? 'tx-test-0001',
