@@ -1,8 +1,10 @@
-# SteemCraft — deterministic Steem Layer‑2 NFT engine
+# SCE — Smart Contract Engine
 
 A production-oriented Node.js/TypeScript service that indexes Steem `custom_json`
-operations (`id = steem_nft_v1`), executes them inside a sandboxed deterministic VM, keeps
+operations (`id = sce-mainnet1`), executes them inside a sandboxed deterministic VM, keeps
 an off-chain state database, and exposes that state through REST, GraphQL and WebSocket.
+
+*The protocol is branded **SCE**; the **SteemCraft** dApps (NFT frontend) build on top of it.*
 
 ```
  Steem RPC (failover)          engine process                      clients
@@ -29,7 +31,7 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 | Concern | Implementation |
 | --- | --- |
 | Block ingestion | sequential ~3s polling against a rotating endpoint list with timeouts, cooldowns and exponential back-off (`src/chain/rpc.ts`, `src/chain/blockStreamer.ts`) |
-| Operation filtering | only `custom_json` ops with `id = steem_nft_v1`; malformed/oversized payloads are logged as `IGNORED` without failing the block (`src/chain/opParser.ts`) |
+| Operation filtering | only `custom_json` ops with `id = sce-mainnet1`; malformed/oversized payloads are logged as `IGNORED` without failing the block (`src/chain/opParser.ts`) |
 | Re-org handling | previous-hash linkage check + tip re-check while idle, rolling 30-block undo/redo buffer, automatic rollback & re-apply, hard stop beyond buffer depth (`src/chain/reorg.ts`) |
 | Execution | one compiled contract source carrying all contracts (`nft`, `tokens` and the `engine` admin namespace, dispatched per envelope), run in an `isolated-vm` V8 isolate (falls back to Node `vm` with the identical source); hard timeout, memory limit, blocked globals (`src/vm/`) |
 | Determinism | `bignumber.js` only — integers/decimal strings, **no floating point anywhere**, frozen BigNumber config on both host and guest, canonical JSON (`src/utils/bn.ts`, `src/utils/canonical.ts`) |
@@ -182,7 +184,7 @@ the fungible **`tokens`** contract
 ([Tokens-Contract wiki](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md),
 v1 scope of [docs/TOKENS-DESIGN.md](docs/TOKENS-DESIGN.md)), and the **`engine`**
 admin namespace (fee-schedule meta-actions, currently `setParam`).
-Every action is a Steem `custom_json` operation with `id = steem_nft_v1`, accepted in
+Every action is a Steem `custom_json` operation with `id = sce-mainnet1`, accepted in
 either envelope shape:
 
 ```jsonc
@@ -315,7 +317,7 @@ extension — upstream they live in a separate `market` contract.
 | `STEEM_RPC_ENDPOINTS` | `https://api.steemit.com,https://api.steemyy.com,https://api.moecki.online` | comma-separated failover list |
 | `BLOCK_POLL_INTERVAL_MS` | `3000` | ≥1000 (Steem block time) |
 | `UNDO_BUFFER_DEPTH` | `30` | rolling undo/redo size |
-| `NFT_OP_ID` | `steem_nft_v1` | `custom_json` id to consume |
+| `SCE_OP_ID` | `sce-mainnet1` | `custom_json` id to consume |
 | `START_BLOCK_HEIGHT` | *(DB cursor)* | first height when the DB is empty |
 | `DATABASE_URL` | — | unset ⇒ `MemoryStore` (state lost on restart) |
 | `STORAGE` | `auto` | `auto` \| `postgres` \| `memory`. `postgres` (used by the compose files) **refuses to start** unless `DATABASE_URL` is set and reachable — no silent in-memory fallback |

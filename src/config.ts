@@ -128,7 +128,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rpcEndpoints: list('STEEM_RPC_ENDPOINTS', DEFAULT_ENDPOINTS),
     blockPollIntervalMs: pollMs,
     undoBufferDepth: int('UNDO_BUFFER_DEPTH', 30, 1),
-    opId: env.NFT_OP_ID ?? 'steem_nft_v1',
+    opId: env.SCE_OP_ID ?? 'sce-mainnet1',
     startBlockHeight: env.START_BLOCK_HEIGHT ? int('START_BLOCK_HEIGHT', 0, 1) : null,
     databaseUrl,
     storage,

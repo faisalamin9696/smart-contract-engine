@@ -1,7 +1,7 @@
 {
-  "name": "steemcraft-nft-engine",
+  "name": "sce-engine",
   "version": "1.0.0",
-  "description": "Production-grade deterministic Steem Layer 2 NFT Engine: block ingestion, sandboxed execution VM, off-chain state DB, GraphQL/REST/WebSocket APIs.",
+  "description": "SCE - Smart Contract Engine: deterministic Steem Layer 2 smart-contract engine (nft / tokens / engine contracts): block ingestion, sandboxed execution VM, off-chain state DB, GraphQL/REST/WebSocket APIs.",
   "private": true,
   "license": "MIT",
   "engines": {

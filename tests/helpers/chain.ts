@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { OpAuth, ParsedOp, RejectedOp } from '../../src/chain/opParser';
 import type { RawBlock, RawTransaction, SteemRpc, HeadInfo } from '../../src/chain/rpc';
 
-export const OP_ID = 'steem_nft_v1';
+export const OP_ID = 'sce-mainnet1';
 
 /** Chain-verified authorities for an account signing with active/ posting keys. */
 export function active(account: string, ...rest: string[]): OpAuth {

@@ -10,7 +10,7 @@ Wiki source: https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master
 ## Goal
 
 Add a wiki-aligned fungible `tokens` contract to this engine — same op id
-(`steem_nft_v1`), same VM, same state transaction as the `nft` contract —
+(`sce-mainnet1`), same VM, same state transaction as the `nft` contract —
 introduce the **SCE** platform token, charge fees from an in-state param table,
 and make marketplace settlement atomic (balances actually move).
 
@@ -75,7 +75,7 @@ initial issue 1,000,000 SCE** to the treasury.
 
 ```jsonc
 // 1. create (free — tokenCreationFee still "0"; maxSupply OMITTED = unlimited)
-{"contractName":"tokens","contractAction":"create","contractPayload":{"symbol":"SCE","name":"SteemCraft Engine","precision":3,"url":"https://steempro.com"}}
+{"contractName":"tokens","contractAction":"create","contractPayload":{"symbol":"SCE","name":"Smart Contract Engine","precision":3,"url":"https://steempro.com"}}
 // 2. issue initial supply to the treasury (free — payer is the treasury itself)
 {"contractName":"tokens","contractAction":"issue","contractPayload":{"symbol":"SCE","to":"steempro.com","quantity":"1000000"}}
 // 3. raise the schedule to its target values
@@ -98,6 +98,14 @@ is still running pre-step-3 code or rejects an op — step 3 never runs unless S
 
 The fee schedule is therefore **live in production** (20 SCE create fees); further SCE
 distribution happens from the treasury (`tokens.issue` stays free while `issueFee = 0`).
+
+> **Rebrand note (2026-10-08):** the execution above went out under the legacy id
+> `steem_nft_v1`. The engine is now branded **SCE — Smart Contract Engine** with id
+> **`sce-mainnet1`**, and legacy ids are *not* parsed — so when the state DB is reset
+> pre-release, re-run this runbook as-is (`node scripts/genesis.cjs`, already updated:
+> id `sce-mainnet1`, token name "Smart Contract Engine"); optionally set
+> `START_BLOCK_HEIGHT` just below the reset head first. The three ops above then remain
+> permanently unparsed history.
 
 ## Key architectural decisions
 
@@ -171,6 +179,14 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
   precision **3**, `maxSupply` omitted (unlimited), initial issue **1,000,000**
   SCE to `steempro.com` (treasury), then raise the schedule via `setParam`
   (exact payloads in the Genesis runbook above).
+- **Protocol identity / op id** *(confirmed 2026-10-08)*: the engine is branded
+  **SCE — Smart Contract Engine**; the frontend keeps **SteemCraft**;
+  `custom_json` id **`sce-mainnet1`** (env `SCE_OP_ID`; convention =
+  `prefix-env-generation` after upstream `ssc-mainnet1`). Legacy `steem_nft_v1`
+  is **not** kept — pre-release is a closed stage, the state DB may be wiped, and
+  genesis is re-broadcast under the new id at reset (token name becomes
+  "Smart Contract Engine"; the ops executed on 2026-10-08 then stay permanently
+  unparsed).
 
 ## Repo state at handoff
 

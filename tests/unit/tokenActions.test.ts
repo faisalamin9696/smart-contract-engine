@@ -33,7 +33,7 @@ describe('tokens contract (wiki Tokens-Contract, v1)', () => {
     await engine.execOk('create', { symbol: 'HERO', name: 'Steem Knights' }, active('alice'), next(), 'nft');
     await engine.execOk(
       'create',
-      { symbol: 'SCE', name: 'SteemCraft Engine', precision: 3, maxSupply: '1000000' },
+      { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3, maxSupply: '1000000' },
       active('steempro.com'),
       next(),
       'tokens',
@@ -492,7 +492,7 @@ describe('guard: conservation + fungible invariants', () => {
   function tokenRow(over: Partial<Token> = {}): Token {
     return {
       symbol: 'SCE',
-      name: 'SteemCraft Engine',
+      name: 'Smart Contract Engine',
       precision: 3,
       maxSupply: '0',
       supply: '100',

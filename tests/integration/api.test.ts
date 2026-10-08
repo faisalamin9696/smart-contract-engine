@@ -15,7 +15,7 @@ const CONFIG: Config = {
   rpcEndpoints: ['http://localhost:1'],
   blockPollIntervalMs: 1000,
   undoBufferDepth: 30,
-  opId: 'steem_nft_v1',
+  opId: 'sce-mainnet1',
   startBlockHeight: 1,
   databaseUrl: null,
   storage: 'memory',
@@ -157,7 +157,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
       {
         pollIntervalMs: 1000,
         undoBufferDepth: 30,
-        opId: 'steem_nft_v1',
+        opId: 'sce-mainnet1',
         startBlockHeight: 1,
         failOnDeepFork: true,
       },

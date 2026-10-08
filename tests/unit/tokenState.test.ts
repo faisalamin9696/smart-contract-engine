@@ -49,7 +49,7 @@ const GENESIS_PARAM: Param = {
 
 const SCE_TOKEN: Token = {
   symbol: 'SCE',
-  name: 'SteemCraft Engine',
+  name: 'Smart Contract Engine',
   precision: 3,
   maxSupply: '9007199254740991',
   supply: '1000000.000',

@@ -31,7 +31,7 @@ async function harness(
     {
       pollIntervalMs: 1000,
       undoBufferDepth: options.undoBufferDepth ?? 30,
-      opId: 'steem_nft_v1',
+      opId: 'sce-mainnet1',
       startBlockHeight: options.startBlockHeight === undefined ? 1 : options.startBlockHeight,
       failOnDeepFork: options.failOnDeepFork ?? true,
     },

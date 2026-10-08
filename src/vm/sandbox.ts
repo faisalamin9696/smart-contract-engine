@@ -212,7 +212,7 @@ class NodeVmSandbox implements Sandbox {
   constructor(source: string, options: SandboxOptions) {
     this.timeoutMs = options.timeoutMs;
     this.context = vm.createContext(Object.create(null) as object, {
-      name: 'steemcraft-nft-contract',
+      name: 'sce-contract',
       codeGeneration: { strings: false, wasm: false },
     });
     vm.runInContext(source, this.context, {

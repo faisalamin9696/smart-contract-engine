@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { assertUintString } from '../utils/bn';
 
 /**
- * Action envelopes carried by `custom_json` operations with `id === steem_nft_v1`.
+ * Action envelopes carried by `custom_json` operations with `id === sce-mainnet1`.
  *
  * Two wire formats are accepted (both parse to the same {@link Envelope}):
  *

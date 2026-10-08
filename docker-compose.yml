@@ -16,7 +16,7 @@ services:
       STEEM_RPC_ENDPOINTS: ${STEEM_RPC_ENDPOINTS:-https://api.steemit.com,https://api.steemyy.com,https://api.moecki.online}
       BLOCK_POLL_INTERVAL_MS: ${BLOCK_POLL_INTERVAL_MS:-3000}
       UNDO_BUFFER_DEPTH: ${UNDO_BUFFER_DEPTH:-30}
-      NFT_OP_ID: ${NFT_OP_ID:-steem_nft_v1}
+      SCE_OP_ID: ${SCE_OP_ID:-sce-mainnet1}
       START_BLOCK_HEIGHT: ${START_BLOCK_HEIGHT:-}
       PORT: ${PORT:-4000}
       WS_PORT: ${WS_PORT:-4001}

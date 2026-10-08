@@ -3,7 +3,9 @@
 
 /**
  * Genesis broadcast for the fungible tokens contract — docs/TOKENS-DESIGN.md
- * "Genesis runbook".
+ * "Genesis runbook". Re-run whenever the state DB is reset: the original
+ * 2026-10-08 genesis went out under the legacy id steem_nft_v1, which this
+ * engine no longer parses (op id is now sce-mainnet1).
  *
  * Sends the three ops as the genesis admin, IN ORDER, and verifies each one through
  * the engine's transaction log before sending the next. Step 3 (setParam) must not
@@ -24,7 +26,7 @@
 
 const { Client, PrivateKey } = require('@steempro/dsteem');
 
-const OP_ID = 'steem_nft_v1';
+const OP_ID = 'sce-mainnet1';
 const ACCOUNT = process.env.GENESIS_ACCOUNT || 'steempro.com';
 const STEEM_RPC = process.env.STEEM_RPC || 'https://api.steemit.com';
 const ENGINE_API = (process.env.ENGINE_API || 'https://nft-api.steempro.com').replace(/\/+$/, '');
@@ -40,7 +42,7 @@ const STEPS = [
       contractAction: 'create',
       contractPayload: {
         symbol: 'SCE',
-        name: 'SteemCraft Engine',
+        name: 'Smart Contract Engine',
         precision: 3,
         url: 'https://steempro.com',
         // maxSupply omitted on purpose = unlimited (an explicit "0" is rejected).

@@ -139,7 +139,7 @@ describe('fee engine (build order step 3)', () => {
     // 1. SCE exists while tokenCreationFee is still "0".
     await engine.execOk(
       'create',
-      { symbol: 'SCE', name: 'SteemCraft Engine', precision: 3, url: 'https://steempro.com' },
+      { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3, url: 'https://steempro.com' },
       active('steempro.com'),
       next(),
       'tokens',

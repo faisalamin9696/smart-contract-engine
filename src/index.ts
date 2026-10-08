@@ -45,7 +45,7 @@ async function createStore(config: Config, logger: Logger): Promise<{ store: Eng
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const logger = new ConsoleLogger(config.logLevel, { service: 'steemcraft-nft-engine' });
+  const logger = new ConsoleLogger(config.logLevel, { service: 'sce-engine' });
 
   const { store, storage } = await createStore(config, logger);
 

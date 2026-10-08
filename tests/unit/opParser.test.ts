@@ -23,7 +23,7 @@ describe('custom_json block parser', () => {
       ],
     });
 
-    const { ops, skipped } = parseBlock(block, 'steem_nft_v1');
+    const { ops, skipped } = parseBlock(block, 'sce-mainnet1');
     expect(ops).toHaveLength(2);
     expect(skipped).toBe(2);
     expect(ops.map((o) => (o.ok ? o.action : o.code))).toEqual(['transfer', 'issue']);
@@ -49,7 +49,7 @@ describe('custom_json block parser', () => {
         ),
       ],
     });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops).toHaveLength(1);
     expect(ops[0]).toMatchObject({
       ok: true,
@@ -75,7 +75,7 @@ describe('custom_json block parser', () => {
       transactions: [notJson, badParams, badAction, floatProps, noAuth],
     });
 
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops).toHaveLength(5);
     expect(ops.every((o) => !o.ok)).toBe(true);
     expect(ops.map((o) => (o as { code: string }).code)).toEqual([
@@ -111,7 +111,7 @@ describe('custom_json block parser', () => {
       previous: 'f'.repeat(40),
       transactions: [foreign, missingField, callArray, delegation, legacy],
     });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops.map((o) => (o as { code: string }).code)).toEqual([
       'UNKNOWN_CONTRACT',
       'INVALID_ENVELOPE',
@@ -146,7 +146,7 @@ describe('custom_json block parser', () => {
       previous: 'f'.repeat(40),
       transactions: [standard, shorthand, defaultNft],
     });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops.map((o) => (o.ok ? `${o.contract}.${o.action}` : o.code))).toEqual([
       'tokens.transfer',
       'tokens.issue',
@@ -159,7 +159,7 @@ describe('custom_json block parser', () => {
       {
         contractName: 'tokens',
         contractAction: 'create',
-        contractPayload: { symbol: 'SCE', name: 'SteemCraft Engine', precision: 3 },
+        contractPayload: { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3 },
       },
       active('steempro.com'),
     );
@@ -175,7 +175,7 @@ describe('custom_json block parser', () => {
     );
     // Shorthand without `contract` defaults to `nft`, so a tokens-shaped payload fails there.
     const ambiguousShorthand = customJsonTx(
-      { action: 'create', params: { symbol: 'SCE', name: 'SteemCraft Engine', precision: 3 } },
+      { action: 'create', params: { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3 } },
       active('alice'),
     );
     const badContractField = customJsonTx(
@@ -188,7 +188,7 @@ describe('custom_json block parser', () => {
       previous: 'f'.repeat(40),
       transactions: [tokensCreate, nftUpdatePrecision, tokensAddProperty, ambiguousShorthand, badContractField],
     });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops[0]).toMatchObject({
       ok: true,
       contract: 'tokens',
@@ -232,7 +232,7 @@ describe('custom_json block parser', () => {
       previous: 'f'.repeat(40),
       transactions: [valid, withAdmin, emptyPatch, foreignAction],
     });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops[0]).toMatchObject({
       ok: true,
       contract: 'engine',
@@ -251,7 +251,7 @@ describe('custom_json block parser', () => {
       params: { note: 'x'.repeat(20000) },
     });
     const block = buildBlock({ height: 1, previous: 'f'.repeat(40), transactions: [huge] });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops[0]).toMatchObject({ ok: false, code: 'PAYLOAD_TOO_LARGE' });
   });
 
@@ -262,7 +262,7 @@ describe('custom_json block parser', () => {
         [
           'custom_json',
           {
-            id: 'steem_nft_v1',
+            id: 'sce-mainnet1',
             json: JSON.stringify(payload),
             required_auths: ['alice'],
             required_posting_auths: [],
@@ -271,7 +271,7 @@ describe('custom_json block parser', () => {
         [
           'custom_json',
           {
-            id: 'steem_nft_v1',
+            id: 'sce-mainnet1',
             json: JSON.stringify({
               action: 'burn',
               params: { nfts: [{ symbol: 'HERO', ids: ['1'] }] },
@@ -283,7 +283,7 @@ describe('custom_json block parser', () => {
       ],
     };
     const block = buildBlock({ height: 5, previous: 'f'.repeat(40), transactions: [tx as never] });
-    const { ops } = parseBlock(block, 'steem_nft_v1');
+    const { ops } = parseBlock(block, 'sce-mainnet1');
     expect(ops.map((o) => o.opIndex)).toEqual([1, 2]);
     expect(ops.map((o) => (o.ok ? o.action : '?'))).toEqual(['transfer', 'burn']);
   });

@@ -5,7 +5,7 @@
  * context as fallback) with the exact same bytes in every environment, so the state
  * transition of a block is reproducible bit-for-bit.
  *
- * Two contracts share this runtime and the single `steem_nft_v1` op id (the same
+ * Three contracts share this runtime and the single `sce-mainnet1` op id (the same
  * multiplexing pattern as the real Steem Engine); `HANDLERS[contract][action]` picks
  * the implementation from the contract selected by the envelope:
  *

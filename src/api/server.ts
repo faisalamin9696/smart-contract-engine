@@ -86,7 +86,7 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
 
   app.get('/', (_req: Request, res: Response) => {
     res.json({
-      name: 'steemcraft-nft-engine',
+      name: 'sce-engine',
       api: {
         health: 'GET /health',
         rest: config.restEnabled ? 'GET /api/v1/{collections,instances,accounts,orders,logs,blocks,status}' : null,
