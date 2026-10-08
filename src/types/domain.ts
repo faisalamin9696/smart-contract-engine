@@ -203,6 +203,28 @@ export type Param = {
   feeTokens: string[];
 }
 
+/**
+ * Genesis `param` row — byte-for-byte the shape migration 0003 seeds into Postgres
+ * (admin/treasury = `steempro.com`, every fee at "0" for the bootstrap window).
+ * `MemoryStore` seeds this on construction so `STORAGE=memory` runs behave like a
+ * migrated database; the genesis admin raises the numbers via `engine.setParam`
+ * after SCE exists.
+ */
+export function genesisParam(): Param {
+  return {
+    admin: 'steempro.com',
+    treasury: 'steempro.com',
+    fees: {
+      nftCreationFee: '0',
+      addPropertyFee: '0',
+      tokenCreationFee: '0',
+      issueFee: '0',
+      fillOrderFeeBps: '0',
+    },
+    feeTokens: ['SCE'],
+  };
+}
+
 export type OrderStatus = 'OPEN' | 'FILLED' | 'CANCELLED';
 
 export type Settlement = {
@@ -289,6 +311,8 @@ export type EngineEventType =
   | 'TOKEN_BURNED'
   /** `tokens` contract: url/metadata/issuer/precision updated (`data.field` says which). */
   | 'TOKEN_UPDATED'
+  /** `engine` contract: the admin raised/changed the in-state fee schedule. */
+  | 'PARAM_UPDATED'
   /** One item of a batch action (wiki `issueMultiple`) failed while others succeeded. */
   | 'ITEM_FAILED'
   | 'TX_FAILED'

@@ -1,5 +1,5 @@
 /**
- * Deterministic contract runtime — both contracts in one sandboxed source.
+ * Deterministic contract runtime — all contracts in one sandboxed source.
  *
  * This source is executed **inside the sandbox** (isolated-vm isolate, or a fresh Node vm
  * context as fallback) with the exact same bytes in every environment, so the state
@@ -21,10 +21,13 @@
  *    supply must decrease), `updateUrl` / `updateMetadata`, `transferOwnership` and
  *    `updatePrecision` (increase only). Quantities are decimal strings handled with
  *    BigNumber; balances are keyed `<account>:<SYMBOL>`.
+ *  - **`engine`** — meta-actions outside both wiki contracts; currently `setParam`,
+ *    which patches the in-state fee schedule (admin-only).
  *
  * Deliberate deviations, all documented in the README:
- *  - no fees yet, no delegation, no staking, no locked tokens (state/entities this L2
- *    does not model — the fee engine arrives with the `param` table wiring);
+ *  - fees are read from the in-state `param` row and debited from the payer to the
+ *    treasury (step 3 fee engine); delegation, staking and locked tokens are not
+ *    modelled at all;
  *  - `number` data properties accept **integers only** (wiki floats break determinism);
  *  - ids are `<SYMBOL>:<id>` composite keys in storage because wiki ids are per-symbol.
  *
@@ -61,6 +64,11 @@ export const CONTRACT_SOURCE = `
   var RE_AMOUNT = /^[0-9]{1,15}([.][0-9]{1,3})?$/;
   var RE_DECIMAL = /^[0-9]{1,15}([.][0-9]{1,8})?$/;
   var RE_INT_STRING = /^-?[0-9]{1,15}$/;
+
+  // ---- fee engine (docs/TOKENS-DESIGN.md step 3) --------------------------
+  var PARAM_KEY = 'param';   // key of the single fee-schedule row (entity "param")
+  var FEE_SYMBOL = 'SCE';    // canonical fee unit for actions without a feeSymbol param
+  var FEE_KEYS = ['nftCreationFee', 'addPropertyFee', 'tokenCreationFee', 'issueFee', 'fillOrderFeeBps'];
 
   var PROPERTY_TYPES = ['number', 'string', 'boolean'];
 
@@ -457,6 +465,7 @@ export const CONTRACT_SOURCE = `
     if (read(S, 'collection', p.symbol) !== null) {
       fail('COLLECTION_EXISTS', 'collection ' + p.symbol + ' already exists');
     }
+    chargeFee(ctx, S, M, creator, 'nftCreationFee');
 
     var collection = {
       symbol: p.symbol,
@@ -611,6 +620,9 @@ export const CONTRACT_SOURCE = `
       if (count >= MAX_PROP_DEFS) {
         fail('TOO_MANY_PROPERTIES', 'at most ' + MAX_PROP_DEFS + ' property definitions are allowed');
       }
+      // Wiki: the first three property definitions are free; the 4th and later pay
+      // addPropertyFee (charged to the issuer, who is the only account that signs here).
+      if (count >= 3) chargeFee(ctx, S, M, before.issuer, 'addPropertyFee');
       var accounts =
         p.authorizedEditingAccounts === undefined
           ? [before.issuer]
@@ -710,7 +722,8 @@ export const CONTRACT_SOURCE = `
 
   function hIssue(ctx, p, S, M, E) {
     var collection = loadCollection(S, p.symbol);
-    requireIssuer(ctx, collection, 'issue');
+    var issuer = requireIssuer(ctx, collection, 'issue');
+    chargeFee(ctx, S, M, issuer, 'issueFee', p.feeSymbol);
     assertNoLocks(p);
     mintOne(ctx, collection, p.to, p.properties, S, M, E);
   }
@@ -731,7 +744,8 @@ export const CONTRACT_SOURCE = `
         if (!isObject(item)) fail('BAD_BATCH', 'instances[' + i + '] must be an object');
         assertNoLocks(item);
         var collection = loadCollection(S, item.symbol);
-        requireIssuer(ctx, collection, 'issueMultiple');
+        var issuer = requireIssuer(ctx, collection, 'issueMultiple');
+        chargeFee(ctx, S, M, issuer, 'issueFee', item.feeSymbol);
         mintOne(ctx, collection, item.to, item.properties, S, M, E);
       } catch (error) {
         emit(E, 'ITEM_FAILED', ctx, {
@@ -1190,6 +1204,7 @@ export const CONTRACT_SOURCE = `
     if (read(S, 'token', p.symbol) !== null) {
       fail('TOKEN_EXISTS', 'token ' + p.symbol + ' already exists');
     }
+    chargeFee(ctx, S, M, creator, 'tokenCreationFee');
 
     var token = {
       symbol: p.symbol,
@@ -1211,10 +1226,11 @@ export const CONTRACT_SOURCE = `
 
   function tIssue(ctx, p, S, M, E) {
     var token = loadToken(S, p.symbol);
-    requireTokenIssuer(ctx, token, 'issue');
+    var issuer = requireTokenIssuer(ctx, token, 'issue');
     validRecipient(p.to, 'to');
     var quantity = validateQuantity(token, p.quantity);
     requireUnderMaxSupply(token, quantity);
+    chargeFee(ctx, S, M, issuer, 'issueFee', p.feeSymbol);
 
     var balance = loadBalance(S, p.to, token.symbol);
     var credited = {
@@ -1391,9 +1407,116 @@ export const CONTRACT_SOURCE = `
     return updated;
   }
 
+  // ------------------------------------------------------------- fee engine
+
+  /**
+   * Debit 'amount' of the fee currency from 'payer' and credit 'param.treasury'
+   * (docs/TOKENS-DESIGN.md step 3). A "0" fee — the bootstrap default — returns
+   * before any balance is touched, so actions stay free until the admin raises the
+   * schedule through 'engine.setParam'. Debit and credit always move the same
+   * amount of the same symbol, so the conservation invariant (sum of balance
+   * deltas vs supply) still holds per operation.
+   */
+  function chargeFee(ctx, S, M, payer, feeKey, feeSymbol) {
+    var param = read(S, 'param', PARAM_KEY);
+    if (param === null) fail('PARAM_NOT_FOUND', 'fee parameter row is missing');
+    var amount = param.fees[feeKey];
+    if (typeof amount !== 'string') fail('BAD_FEE_KEY', 'unknown fee key: ' + feeKey);
+    if (amount === '0') return null;
+    var symbol = feeSymbol === undefined ? FEE_SYMBOL : feeSymbol;
+    if (param.feeTokens.indexOf(symbol) < 0) {
+      fail('FEE_TOKEN_UNSUPPORTED', 'fee token ' + symbol + ' is not in param.feeTokens');
+    }
+    var feeToken = read(S, 'token', symbol);
+    if (feeToken === null) {
+      fail('TOKEN_NOT_FOUND', 'fee token ' + symbol + ' does not exist yet');
+    }
+    if (new BigNumber(amount).decimalPlaces() > feeToken.precision) {
+      fail('BAD_FEE', 'fee ' + feeKey + ' exceeds the precision of ' + symbol);
+    }
+    // Paying the treasury yourself (admin creating while treasury == admin) is a no-op.
+    if (payer === param.treasury) return amount;
+    var payerBalance = read(S, 'balance', payer + ':' + symbol);
+    if (payerBalance === null || new BigNumber(payerBalance.quantity).lt(amount)) {
+      fail('INSUFFICIENT_BALANCE', payer + ' cannot pay the ' + feeKey + ' of ' + amount + ' ' + symbol);
+    }
+    write(S, M, 'balance', payer + ':' + symbol, {
+      account: payer,
+      symbol: symbol,
+      quantity: new BigNumber(payerBalance.quantity).minus(amount).toFixed(),
+    });
+    var treasuryBalance = read(S, 'balance', param.treasury + ':' + symbol);
+    var treasuryQuantity = '0';
+    if (treasuryBalance !== null) treasuryQuantity = treasuryBalance.quantity;
+    write(S, M, 'balance', param.treasury + ':' + symbol, {
+      account: param.treasury,
+      symbol: symbol,
+      quantity: new BigNumber(treasuryQuantity).plus(amount).toFixed(),
+    });
+    return amount;
+  }
+
+  /**
+   * 'engine.setParam' — admin-only partial patch of the fee row (active authority of
+   * 'param.admin'). The host schema already rejects unknown keys; the VM re-validates
+   * because TestEngine callers may bypass zod. 'admin'/'treasury' are immutable and
+   * simply not accepted here (the guard would reject a write that changed them).
+   */
+  function hSetParam(ctx, p, S, M, E) {
+    var param = read(S, 'param', PARAM_KEY);
+    if (param === null) fail('PARAM_NOT_FOUND', 'fee parameter row is missing');
+    if (!hasAuth(ctx, param.admin, 'active')) {
+      fail('NOT_AUTHORIZED', 'only the engine admin ' + param.admin + ' may setParam');
+    }
+    if (p.fees === undefined && p.feeTokens === undefined) {
+      fail('BAD_PARAMS', 'setParam requires a fees patch and/or feeTokens');
+    }
+    var updated = copy(param);
+    updated.fees = copy(param.fees);
+    if (p.fees !== undefined) {
+      if (!isObject(p.fees)) fail('BAD_FEES', 'fees must be an object');
+      var keys = Object.keys(p.fees);
+      if (keys.length === 0) fail('BAD_FEES', 'fees must patch at least one fee');
+      for (var i = 0; i < keys.length; i++) {
+        var key = keys[i];
+        if (FEE_KEYS.indexOf(key) < 0) fail('BAD_FEE_KEY', 'unknown fee: ' + key);
+        var value = p.fees[key];
+        if (key === 'fillOrderFeeBps') {
+          if (typeof value !== 'string' || !RE_UINT.test(value) || intGt(value, '10000')) {
+            fail('BAD_FEE', 'fillOrderFeeBps must be an unsigned integer at most 10000');
+          }
+        } else if (typeof value !== 'string' || !RE_DECIMAL.test(value)) {
+          fail('BAD_FEE', 'fee ' + key + ' must be a non-negative decimal string');
+        }
+        updated.fees[key] = value;
+      }
+    }
+    if (p.feeTokens !== undefined) {
+      if (!Array.isArray(p.feeTokens) || p.feeTokens.length > 10) {
+        fail('BAD_FEE_TOKENS', 'feeTokens must be an array of at most 10 symbols');
+      }
+      var seen = [];
+      for (var j = 0; j < p.feeTokens.length; j++) {
+        var entry = p.feeTokens[j];
+        if (typeof entry !== 'string' || !RE_SYMBOL.test(entry)) {
+          fail('BAD_FEE_TOKENS', 'invalid fee token symbol: ' + String(entry));
+        }
+        if (seen.indexOf(entry) >= 0) fail('BAD_FEE_TOKENS', 'duplicate fee token: ' + entry);
+        seen.push(entry);
+      }
+      updated.feeTokens = seen;
+    }
+    write(S, M, 'param', PARAM_KEY, updated);
+    emit(E, 'PARAM_UPDATED', ctx, {
+      account: param.admin,
+      data: { fees: updated.fees, feeTokens: updated.feeTokens },
+    });
+    return updated;
+  }
+
   // ------------------------------------------------------------------ dispatch
 
-  // Contract-scoped dispatch: both contracts share several action names, so the
+  // Contract-scoped dispatch: several action names are shared across contracts, so the
   // envelope's contract selects the table (mirrors real Steem Engine multiplexing).
   var HANDLERS = {
     nft: {
@@ -1430,6 +1553,9 @@ export const CONTRACT_SOURCE = `
       updateMetadata: tUpdateMetadata,
       transferOwnership: tTransferOwnership,
       updatePrecision: tUpdatePrecision,
+    },
+    engine: {
+      setParam: hSetParam,
     },
   };
 

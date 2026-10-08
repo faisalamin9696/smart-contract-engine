@@ -3,7 +3,9 @@ import {
   CollectionSchema,
   InstanceSchema,
   MarketOrderSchema,
+  PARAM_KEY,
   TokenSchema,
+  genesisParam,
   type Balance,
   type BlockRecord,
   type Collection,
@@ -67,6 +69,12 @@ export class MemoryStore implements EngineStore {
   private logs: TransactionLogRecord[] = [];
   private lock: Promise<unknown> = Promise.resolve();
   private closed = false;
+
+  constructor() {
+    // Mirror migration 0003: a migrated database always has the genesis fee row, so
+    // memory-mode stores must too (the VM reads it on every fee-bearing action).
+    this.kv.param.set(PARAM_KEY, genesisParam());
+  }
 
   async get(entity: EntityKind, key: string): Promise<JsonValue | null> {
     return this.kv[entity].get(key) ?? null;

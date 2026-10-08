@@ -1,7 +1,32 @@
 import type { OpAuth } from '../chain/opParser';
 import type { ActionName, ContractName } from '../types/actions';
-import { balanceKey, emptySnapshot, instanceKey, type StateSnapshot } from '../types/domain';
+import { PARAM_KEY, balanceKey, emptySnapshot, instanceKey, type Param, type StateSnapshot } from '../types/domain';
 import type { EngineStore } from './store';
+
+/** How one fee-bearing action resolves its payer and fee currency at routing time. */
+type FeeRoute = {
+  /** Payer is the first active authority (`create`); otherwise the collection/token issuer. */
+  authPayer: boolean;
+  /** The action accepts a `feeSymbol` param that may name a non-default fee currency. */
+  feeSymbolParam: boolean;
+};
+
+/**
+ * Actions the fee engine charges for (docs/TOKENS-DESIGN.md step 3). `fillOrder`'s
+ * treasury cut is wired with marketplace settlement (step 4), not here.
+ */
+const FEE_ROUTES: Record<'nft' | 'tokens', Partial<Record<ActionName, FeeRoute>>> = {
+  nft: {
+    create: { authPayer: true, feeSymbolParam: false },
+    addProperty: { authPayer: false, feeSymbolParam: false },
+    issue: { authPayer: false, feeSymbolParam: true },
+    issueMultiple: { authPayer: false, feeSymbolParam: true },
+  },
+  tokens: {
+    create: { authPayer: true, feeSymbolParam: false },
+    issue: { authPayer: false, feeSymbolParam: true },
+  },
+};
 
 /**
  * Builds the minimal read-view the sandbox receives for one action.
@@ -51,7 +76,11 @@ export async function buildSnapshot(
   const symbol = str(params.symbol);
   const to = str(params.to);
 
-  if (contract === 'tokens') {
+  if (contract === 'engine') {
+    // Meta-actions: `setParam` reads and rewrites the single fee row; its signer
+    // (param.admin) is already visible from the signer accounts prefetched above.
+    if (action === 'setParam') need.param.add(PARAM_KEY);
+  } else if (contract === 'tokens') {
     // Fungible rows: the token definition plus the balance rows this action can move —
     // the sender's own row (first active authority; issue/burn/transfer act on it) and
     // the recipient's. Posting-only metadata actions never touch balances, and the
@@ -122,6 +151,64 @@ export async function buildSnapshot(
         // transferOwnership) already covered by the generic step above.
         break;
       }
+    }
+  }
+
+  // Fee engine (step 3): fee-bearing actions read the `param` row in-VM and — when
+  // the scheduled fee is non-zero — move that amount from the payer to the treasury.
+  // The prefetch is unconditional (during the zero-fee bootstrap these are unused
+  // null reads); what varies is who can pay: the first active authority for `create`,
+  // otherwise the collection/token issuer — plus nft-authorized issuers, who may be
+  // the actual signer of an `issue`.
+  const feeRoute = contract === 'nft' || contract === 'tokens' ? FEE_ROUTES[contract][action] : undefined;
+  if (feeRoute !== undefined) {
+    need.param.add(PARAM_KEY);
+    const feeSymbols = new Set<string>();
+    if (!feeRoute.feeSymbolParam) {
+      feeSymbols.add('SCE');
+    } else if (action === 'issueMultiple') {
+      // Each batch item carries its own optional feeSymbol.
+      for (const item of arr(params.instances)) {
+        if (!isObject(item)) continue;
+        feeSymbols.add(typeof item.feeSymbol === 'string' ? item.feeSymbol : 'SCE');
+      }
+      if (feeSymbols.size === 0) feeSymbols.add('SCE');
+    } else {
+      feeSymbols.add(typeof params.feeSymbol === 'string' ? params.feeSymbol : 'SCE');
+    }
+    for (const feeSymbol of feeSymbols) need.token.add(feeSymbol);
+
+    const paramRow = (await store.get('param', PARAM_KEY)) as Param | null;
+    if (paramRow !== null) {
+      for (const feeSymbol of feeSymbols) need.balance.add(balanceKey(paramRow.treasury, feeSymbol));
+    }
+
+    const payers = new Set<string>();
+    const addIssuerPayers = async (entitySymbol: string): Promise<void> => {
+      const entity = contract === 'nft' ? 'collection' : 'token';
+      const raw = await store.get(entity, entitySymbol);
+      if (raw && typeof raw === 'object') {
+        const row = raw as { issuer?: unknown; authorizedIssuingAccounts?: unknown };
+        if (typeof row.issuer === 'string') payers.add(row.issuer);
+        for (const account of arr(row.authorizedIssuingAccounts)) {
+          if (typeof account === 'string') payers.add(account);
+        }
+      }
+    };
+    if (feeRoute.authPayer) {
+      if (auth.active[0]) payers.add(auth.active[0]);
+    } else if (action === 'issueMultiple') {
+      // Batch items name their own collections (no top-level symbol).
+      for (const item of arr(params.instances)) {
+        if (!isObject(item)) continue;
+        const itemSymbol = str(item.symbol);
+        if (itemSymbol) await addIssuerPayers(itemSymbol);
+      }
+    } else if (symbol) {
+      await addIssuerPayers(symbol);
+    }
+    for (const payer of payers) {
+      for (const feeSymbol of feeSymbols) need.balance.add(balanceKey(payer, feeSymbol));
     }
   }
 

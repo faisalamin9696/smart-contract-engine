@@ -11,12 +11,12 @@ import { assertUintString } from '../utils/bn';
  *  2. **Engine shorthand** — `{ "action": "issue", "params": { ... } }`, optionally
  *     carrying `"contract": "tokens"` (defaults to `nft` for back-compatibility).
  *
- * One op id multiplexes both contracts (`nft` and `tokens`) — the same pattern as the
- * real Steem Engine, where `contractName` inside the payload selects the contract even
- * though every call shares a single `custom_json` id. Shared action names (`create`,
- * `issue`, `transfer`, `burn`, `updateUrl`, `updateMetadata`, `transferOwnership`)
- * are resolved per contract: each contract has its own action list, param schemas and
- * entity allow list.
+ * One op id multiplexes all three contracts (`nft`, `tokens` and `engine`) — the same
+ * pattern as the real Steem Engine, where `contractName` inside the payload selects the
+ * contract even though every call shares a single `custom_json` id. Shared action names
+ * (`create`, `issue`, `transfer`, `burn`, `updateUrl`, `updateMetadata`,
+ * `transferOwnership`) are resolved per contract: each contract has its own action list,
+ * param schemas and entity allow list.
  *
  * Action names and parameters follow
  * https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md
@@ -28,7 +28,7 @@ import { assertUintString } from '../utils/bn';
  */
 
 /** Contracts implemented under this op id (anything else is `UNKNOWN_CONTRACT`). */
-export const CONTRACTS = ['nft', 'tokens'] as const;
+export const CONTRACTS = ['nft', 'tokens', 'engine'] as const;
 export type ContractName = (typeof CONTRACTS)[number];
 
 /** Standard `nft` contract actions (wiki NFT-Contracts + the marketplace extension). */
@@ -73,15 +73,19 @@ export const TOKENS_ACTIONS = [
 
 export type NftActionName = (typeof NFT_ACTIONS)[number];
 export type TokenActionName = (typeof TOKENS_ACTIONS)[number];
-/** Any action name across both contracts (shared names appear in both lists). */
-export type ActionName = NftActionName | TokenActionName;
+/** `engine` meta-actions (not part of either wiki contract — fee admin, see step 3). */
+export const ENGINE_ACTIONS = ['setParam'] as const;
+export type EngineActionName = (typeof ENGINE_ACTIONS)[number];
+/** Any action name across all three contracts (shared names appear in several lists). */
+export type ActionName = NftActionName | TokenActionName | EngineActionName;
 
-/** Every action either contract accepts (union — used for diagnostics). */
-export const ACTIONS = [...NFT_ACTIONS, ...TOKENS_ACTIONS] as const;
+/** Every action any contract accepts (union — used for diagnostics). */
+export const ACTIONS = [...NFT_ACTIONS, ...TOKENS_ACTIONS, ...ENGINE_ACTIONS] as const;
 
 export const ACTIONS_BY_CONTRACT: Record<ContractName, readonly ActionName[]> = {
   nft: NFT_ACTIONS,
   tokens: TOKENS_ACTIONS,
+  engine: ENGINE_ACTIONS,
 };
 
 /**
@@ -238,7 +242,7 @@ const IssueParams = z
     symbol: SymbolSchema,
     to: AccountNameSchema,
     properties: PropertyValueMap.optional(),
-    // Wiki requires feeSymbol; this L2 charges no fees, so it is accepted and ignored.
+    // Wiki requires feeSymbol; it is validated against param.feeTokens once issueFee > 0.
     feeSymbol: z.string().min(1).max(10).optional(),
     fromType: TypeSchema.optional(),
     toType: TypeSchema.optional(),
@@ -351,7 +355,7 @@ const TokenCreateParams = z
   .strict()
   .superRefine(refineMaxSupply);
 
-/** Wiki `tokens.issue` — issuer only; `feeSymbol` becomes real once fees exist (step 3). */
+/** Wiki `tokens.issue` — issuer only; `feeSymbol` must be in param.feeTokens when charged. */
 const TokenIssueParams = z
   .object({
     symbol: SymbolSchema,
@@ -372,6 +376,40 @@ const TokenBurnParams = z.object({ symbol: SymbolSchema, quantity: QuantitySchem
 const UpdatePrecisionParams = z
   .object({ symbol: SymbolSchema, precision: z.number().int().min(0).max(8) })
   .strict();
+
+/* --------------------------------------------------- engine contract params */
+
+/** Fee cut in basis points — at most 100% (10000 bps). */
+const FeeBpsSchema = UintStringSchema.refine((v) => Number(v) <= 10000, 'fillOrderFeeBps must be <= 10000');
+
+/**
+ * `engine.setParam` — partial patch of the in-state fee row (admin-only, enforced
+ * in-VM against `param.admin`). `admin`/`treasury` never appear here: they are
+ * immutable (IMMUTABLE_FIELDS + strict schemas reject them at both layers).
+ */
+const SetParamParams = z
+  .object({
+    fees: z
+      .object({
+        nftCreationFee: QuantitySchema.optional(),
+        addPropertyFee: QuantitySchema.optional(),
+        tokenCreationFee: QuantitySchema.optional(),
+        issueFee: QuantitySchema.optional(),
+        fillOrderFeeBps: FeeBpsSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    feeTokens: z.array(SymbolSchema).max(10).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.fees === undefined && value.feeTokens === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'setParam requires a fees patch and/or feeTokens',
+      });
+    }
+  });
 
 const NFT_PARAM_SCHEMAS: Record<NftActionName, z.ZodTypeAny> = {
   create: CreateParams,
@@ -414,9 +452,11 @@ const TOKENS_PARAM_SCHEMAS: Record<TokenActionName, z.ZodTypeAny> = {
 const PARAM_SCHEMAS: {
   nft: Record<NftActionName, z.ZodTypeAny>;
   tokens: Record<TokenActionName, z.ZodTypeAny>;
+  engine: Record<EngineActionName, z.ZodTypeAny>;
 } = {
   nft: NFT_PARAM_SCHEMAS,
   tokens: TOKENS_PARAM_SCHEMAS,
+  engine: { setParam: SetParamParams },
 };
 
 export class PayloadError extends Error {
@@ -493,7 +533,7 @@ export function parseEnvelope(rawJson: string): Envelope {
   if (typeof contract !== 'string' || !(CONTRACTS as readonly string[]).includes(contract)) {
     throw new PayloadError(
       'UNKNOWN_CONTRACT',
-      `only the "nft" and "tokens" contracts are implemented (got ${JSON.stringify(contract)})`,
+      `only the ${CONTRACTS.map((c) => JSON.stringify(c)).join(', ')} contracts are implemented (got ${JSON.stringify(contract)})`,
     );
   }
   const name = contract as ContractName;
@@ -545,14 +585,16 @@ export function parseEnvelope(rawJson: string): Envelope {
 
 /**
  * Entities each action is allowed to mutate (defense-in-depth allow list,
- * scoped per contract — both contracts share several action names).
+ * scoped per contract — several action names appear in more than one list).
+ * Fee-bearing actions may additionally move `balance` rows (payer → treasury).
  */
 export const ACTION_ENTITY_ALLOWLIST: {
   nft: Record<NftActionName, readonly string[]>;
   tokens: Record<TokenActionName, readonly string[]>;
+  engine: Record<EngineActionName, readonly string[]>;
 } = {
   nft: {
-    create: ['collection', 'account'],
+    create: ['collection', 'account', 'balance'],
     updateUrl: ['collection'],
     updateMetadata: ['collection'],
     updateName: ['collection'],
@@ -563,13 +605,13 @@ export const ACTION_ENTITY_ALLOWLIST: {
     addAuthorizedIssuingContracts: ['collection'],
     removeAuthorizedIssuingContracts: ['collection'],
     transferOwnership: ['collection', 'account'],
-    addProperty: ['collection'],
+    addProperty: ['collection', 'balance'],
     setPropertyPermissions: ['collection'],
     setProperties: ['instance'],
     setGroupBy: ['collection'],
     updatePropertyDefinition: ['collection'],
-    issue: ['collection', 'instance', 'account'],
-    issueMultiple: ['collection', 'instance', 'account'],
+    issue: ['collection', 'instance', 'account', 'balance'],
+    issueMultiple: ['collection', 'instance', 'account', 'balance'],
     transfer: ['instance', 'account'],
     burn: ['collection', 'instance'],
     placeOrder: ['order', 'instance', 'account', 'meta'],
@@ -578,7 +620,7 @@ export const ACTION_ENTITY_ALLOWLIST: {
     // `meta` is only touched by counter increments, never by account/collection code paths.
   },
   tokens: {
-    create: ['token', 'account'],
+    create: ['token', 'account', 'balance'],
     issue: ['token', 'balance', 'account'],
     transfer: ['balance', 'account'],
     burn: ['token', 'balance'],
@@ -586,7 +628,10 @@ export const ACTION_ENTITY_ALLOWLIST: {
     updateMetadata: ['token'],
     transferOwnership: ['token', 'account'],
     updatePrecision: ['token'],
-    // `param` is reserved for the fee engine (setParam) — no tokens action may touch it yet.
+    // `param` stays closed to every tokens action — only `engine.setParam` writes it.
+  },
+  engine: {
+    setParam: ['param'],
   },
 };
 

@@ -6,8 +6,9 @@ import { EngineEventBus } from '../../src/indexer/events';
 import type { BlockHeader, OpOutcome } from '../../src/vm/executor';
 import { executeOp } from '../../src/vm/executor';
 import { createSandbox, type Sandbox, type SandboxOptions } from '../../src/vm/sandbox';
-import { BalanceSchema, CollectionSchema, InstanceSchema, MarketOrderSchema, TokenSchema } from '../../src/types/domain';
-import type { Balance, Collection, Instance, MarketOrder, Mutation, Token } from '../../src/types/domain';
+import { BalanceSchema, CollectionSchema, InstanceSchema, MarketOrderSchema, ParamSchema, TokenSchema } from '../../src/types/domain';
+import type { Balance, Collection, Instance, MarketOrder, Mutation, Param, Token } from '../../src/types/domain';
+import { PARAM_KEY } from '../../src/types/domain';
 import type { ContractName } from '../../src/types/actions';
 
 export const DEFAULT_HEADER: BlockHeader = {
@@ -117,6 +118,12 @@ export class TestEngine {
   async balance(account: string, symbol: string): Promise<Balance | null> {
     const raw = await this.store.get('balance', `${account}:${symbol}`);
     return raw === null ? null : BalanceSchema.parse(raw);
+  }
+
+  /** Fee-schedule row (entity `param`, single key `param`). */
+  async param(): Promise<Param | null> {
+    const raw = await this.store.get('param', PARAM_KEY);
+    return raw === null ? null : ParamSchema.parse(raw);
   }
 
   /**

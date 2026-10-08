@@ -112,6 +112,11 @@ describe('memory store: token/balance/param partitions', () => {
     await store.close();
   });
 
+  it('seeds the genesis param row on construction (migration 0003 parity)', async () => {
+    expect(await getParam(store)).toEqual(GENESIS_PARAM);
+    expect(store.dump().param).toEqual({ param: GENESIS_PARAM });
+  });
+
   it('round-trips through the typed helpers', async () => {
     await store.put('token', SCE_TOKEN.symbol, SCE_TOKEN);
     await store.put('balance', balanceKey('steempro.com', 'SCE'), TREASURY_BALANCE);
@@ -174,7 +179,9 @@ describe('memory store: token/balance/param partitions', () => {
 
     expect(await getToken(store, 'SCE')).toBeNull();
     expect(await getBalance(store, 'steempro.com', 'SCE')).toBeNull();
-    expect(await getParam(store)).toBeNull();
+    // The param partition is seeded at construction (memory-mode parity with migration
+    // 0003), so the rollback restores the genesis row rather than an empty partition.
+    expect(await getParam(store)).toEqual(GENESIS_PARAM);
   });
 });
 
@@ -197,12 +204,13 @@ describe('journal + undo over the new partitions', () => {
       [
         { entity: 'token', key: 'SCE', value: SCE_TOKEN },
         { entity: 'balance', key: balanceKey('steempro.com', 'SCE'), value: TREASURY_BALANCE },
-        { entity: 'param', key: PARAM_KEY, value: GENESIS_PARAM },
+        { entity: 'param', key: PARAM_KEY, value: { ...GENESIS_PARAM, feeTokens: ['SCE', 'STEEM'] } },
       ],
       snapshotWith({
         token: { SCE: null },
         balance: { 'steempro.com:SCE': null },
-        param: { param: null },
+        // Seeded at construction — the read set must reflect the stored genesis row.
+        param: { param: GENESIS_PARAM },
       }),
     );
     expect(await getToken(store, 'SCE')).toEqual(SCE_TOKEN);

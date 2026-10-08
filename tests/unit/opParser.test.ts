@@ -203,6 +203,47 @@ describe('custom_json block parser', () => {
     expect(ops[4]).toMatchObject({ ok: false, code: 'UNKNOWN_CONTRACT' });
   });
 
+  it('multiplexes the engine contract (setParam) and validates its payload', () => {
+    const valid = customJsonTx(
+      { contractName: 'engine', contractAction: 'setParam', contractPayload: { fees: { nftCreationFee: '20' } } },
+      active('steempro.com'),
+    );
+    // admin/treasury are immutable — the strict payload schema rejects them outright.
+    const withAdmin = customJsonTx(
+      {
+        contractName: 'engine',
+        contractAction: 'setParam',
+        contractPayload: { fees: { nftCreationFee: '20' }, admin: 'bob' },
+      },
+      active('steempro.com'),
+    );
+    const emptyPatch = customJsonTx(
+      { contractName: 'engine', contractAction: 'setParam', contractPayload: {} },
+      active('steempro.com'),
+    );
+    // `create` does not exist on the engine contract.
+    const foreignAction = customJsonTx(
+      { contractName: 'engine', contractAction: 'create', contractPayload: { symbol: 'HERO', name: 'x' } },
+      active('alice'),
+    );
+
+    const block = buildBlock({
+      height: 5,
+      previous: 'f'.repeat(40),
+      transactions: [valid, withAdmin, emptyPatch, foreignAction],
+    });
+    const { ops } = parseBlock(block, 'steem_nft_v1');
+    expect(ops[0]).toMatchObject({
+      ok: true,
+      contract: 'engine',
+      action: 'setParam',
+      params: { fees: { nftCreationFee: '20' } },
+    });
+    expect(ops[1]).toMatchObject({ ok: false, code: 'INVALID_PARAMS' });
+    expect(ops[2]).toMatchObject({ ok: false, code: 'INVALID_PARAMS' });
+    expect(ops[3]).toMatchObject({ ok: false, code: 'INVALID_ENVELOPE' });
+  });
+
   it('flags oversized payloads before parsing them', () => {
     const huge = customJsonTx({ action: 'issue', params: {} }, active('alice'));
     (huge.operations[0][1] as { json: string }).json = JSON.stringify({

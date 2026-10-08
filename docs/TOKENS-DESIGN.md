@@ -1,8 +1,10 @@
 # Tokens Contract — Design Brief (Phase 1)
 
-Status: **Phase 1 in progress** — build order steps 1–2 done (step 1: migration 0003 +
+Status: **Phase 1 in progress** — build order steps 1–3 done (step 1: migration 0003 +
 store layer, 2026-10-07; step 2: contract-scoped dispatch, tokens handlers, guard
-conservation, 2026-10-08)
+conservation, 2026-10-08; step 3: fee engine — `engine.setParam`, `chargeFee()`
+wired into nft create/addProperty(4th+)/issue(+issueMultiple)/tokens create/issue,
+2026-10-08)
 Wiki source: https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md
 
 ## Goal
@@ -56,7 +58,29 @@ maxSupply cap `9,007,199,254,740,991` (wiki/JS max safe integer).
 SCE cannot pay fees before SCE exists. Migration `0003` seeds the `param` row
 with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
 `tokens.issue` initial supply → `setParam` raises fees to target values.
-`setParam` = engine action, admin-only, signed on-chain.
+`setParam` = engine action, admin-only, signed on-chain. *(Implemented step 3:
+`setParam` lives in its own third contract namespace — `contractName: 'engine'`,
+currently the only action — and `chargeFee()` in `contractSource.ts` debits the
+authorised payer → `param.treasury` on nft `create`/`addProperty`(4th+)/
+`issue`(+`issueMultiple`)/tokens `create`/`issue`; fee moves net to zero, so
+guard conservation holds. `fillOrderFeeBps` is wired with step 4 settlement.
+`MemoryStore` seeds the same genesis row as the migration so `STORAGE=memory`
+runs behave like a migrated database.)*
+
+### Genesis runbook (broadcast as `steempro.com`, active key)
+
+Three ops, in order — the first two are free (fees still 0), the third raises
+the schedule. Numbers confirmed 2026-10-08: **precision 3, unlimited supply,
+initial issue 1,000,000 SCE** to the treasury.
+
+```jsonc
+// 1. create (free — tokenCreationFee still "0"; maxSupply OMITTED = unlimited)
+{"contractName":"tokens","contractAction":"create","contractPayload":{"symbol":"SCE","name":"SteemCraft Engine","precision":3,"url":"https://steempro.com"}}
+// 2. issue initial supply to the treasury (free — payer is the treasury itself)
+{"contractName":"tokens","contractAction":"issue","contractPayload":{"symbol":"SCE","to":"steempro.com","quantity":"1000000"}}
+// 3. raise the schedule to its target values
+{"contractName":"engine","contractAction":"setParam","contractPayload":{"fees":{"nftCreationFee":"20","addPropertyFee":"20","tokenCreationFee":"20","issueFee":"0","fillOrderFeeBps":"200"}}}
+```
 
 ## Key architectural decisions
 
@@ -71,10 +95,12 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
    contract; snapshot prefetch routing branches on `contract`; the engine
    shorthand envelope accepts an optional `contract` field, defaulting to
    `nft` for back-compatibility.)*
-2. **`feeSymbol` becomes real.** Today accepted-and-ignored
-   (`types/actions.ts:192`, mirrored in frontend `builder.ts:708`); once fees
-   exist, `issue.feeSymbol` must be in `param.feeTokens` (wiki's
-   `nftIssuanceFee` map pattern). No payload break — clients already send it.
+2. **`feeSymbol` becomes real.** Once fees exist, `issue.feeSymbol` must be in
+   `param.feeTokens` (wiki's `nftIssuanceFee` map pattern); during the zero-fee
+   bootstrap it is accepted and ignored exactly as before, so no payload break
+   for clients that already send it (frontend `builder.ts:708`).
+   *(Implemented step 3 — validated inside `chargeFee()` only when the fee is
+   non-zero.)*
 3. **Guard conservation invariant.** `vm/guard.ts` additionally asserts every
    state txn nets to **zero** across balances+treasury (transfer = −x/+x,
    fee = split, issue/burn = ±supply only). Makes ledger bugs structurally
@@ -104,7 +130,9 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
    zod schemas in `types/actions.ts` — **done 2026-10-08** (`TOKEN_*` events are
    emitted from step 2; their WS routing lands with step 5)
 3. Fee engine: `param` row, `requireFee()`, `setParam`, wire into NFT
-   `create`/`addProperty`(4th+)/`issue`
+   `create`/`addProperty`(4th+)/`issue` — **done 2026-10-08** (implemented as
+   `engine.setParam` + `chargeFee()`; also wired `issueMultiple` (per item) and
+   tokens `create`/`issue`; `MemoryStore` seeds the genesis param row)
 4. Settlement: `priceSymbol` + atomic `fillOrder`
 5. API/WS: GraphQL/REST `tokens`, `token(symbol)`, `balances(account)`,
    `params`; WS events `TOKEN_*` / `BALANCE_*`
@@ -122,7 +150,10 @@ with **all fees = 0**. Genesis admin then: `tokens.create` SCE →
   token create 20 SCE · issue free · placeOrder free · fillOrder 2 % (200 bps) —
   migration seeds all fees **0** (fee bootstrap), genesis raises them via
   `setParam` after SCE exists.
-- **Still open**: SCE initial supply + distribution
+- **SCE genesis** *(confirmed 2026-10-08 — replaces "still open")*:
+  precision **3**, `maxSupply` omitted (unlimited), initial issue **1,000,000**
+  SCE to `steempro.com` (treasury), then raise the schedule via `setParam`
+  (exact payloads in the Genesis runbook above).
 
 ## Repo state at handoff
 

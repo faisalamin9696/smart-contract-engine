@@ -10,8 +10,9 @@ import { MutationGuardError, validateMutations } from '../../src/vm/guard';
  * the wiki authorisation matrix, decimal/precision rules, supply accounting and the
  * events the WS layer will later route (TOKEN_*).
  *
- * The fee engine (step 3 of the build order) is not wired yet, so `feeSymbol` is
- * accepted and ignored, exactly like on the `nft` contract today.
+ * Fees: see fees.test.ts — during the bootstrap window every fee is "0", so
+ * `feeSymbol` is only validated once the admin raises the schedule through
+ * `engine.setParam`.
  */
 describe('tokens contract (wiki Tokens-Contract, v1)', () => {
   let engine: TestEngine;
