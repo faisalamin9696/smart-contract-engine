@@ -82,6 +82,12 @@ initial issue 1,000,000 SCE** to the treasury.
 {"contractName":"engine","contractAction":"setParam","contractPayload":{"fees":{"nftCreationFee":"20","addPropertyFee":"20","tokenCreationFee":"20","issueFee":"0","fillOrderFeeBps":"200"}}}
 ```
 
+Helper: `node scripts/genesis.cjs` broadcasts the three ops **in order** and verifies
+each through the engine's transaction log before sending the next (aborts if the engine
+is still running pre-step-3 code or rejects an op — step 3 never runs unless SCE exists).
+`--dry-run` prints the payloads without signing; the active WIF is read from
+`STEEM_ACTIVE_WIF` at runtime and never stored.
+
 ## Key architectural decisions
 
 1. **Contract-scoped dispatch.** Both contracts share action names (`create`,
