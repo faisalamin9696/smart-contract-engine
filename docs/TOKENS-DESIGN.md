@@ -88,6 +88,17 @@ is still running pre-step-3 code or rejects an op — step 3 never runs unless S
 `--dry-run` prints the payloads without signing; the active WIF is read from
 `STEEM_ACTIVE_WIF` at runtime and never stored.
 
+**Executed on mainnet 2026-10-08** (via `scripts/genesis.cjs`, all APPLIED):
+
+| Step | tx id | height |
+| --- | --- | --- |
+| `tokens.create` SCE | `523f0d77a9033bcee7d95e3c26b727b963480994` | 110263779 |
+| `tokens.issue` 1,000,000 | `ce6bb332c09703f1f78ce27183f6b1a50f56b15c` | 110263782 |
+| `engine.setParam` raise fees | `8917513d873ffbb84ec85dc25b76ec86db2fe4e7` | 110263783 |
+
+The fee schedule is therefore **live in production** (20 SCE create fees); further SCE
+distribution happens from the treasury (`tokens.issue` stays free while `issueFee = 0`).
+
 ## Key architectural decisions
 
 1. **Contract-scoped dispatch.** Both contracts share action names (`create`,
@@ -164,9 +175,9 @@ is still running pre-step-3 code or rejects an op — step 3 never runs unless S
 ## Repo state at handoff
 
 - Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
-  (private), HEAD `4f349ae`; gates before push: `npx tsc --noEmit`,
-  `npx jest --runInBand`, `npm run build`, `npx js-yaml <compose>`,
-  `sh -n docker-entrypoint.sh`
+  (private), main with build-order steps 1–3 + genesis helper; gates before push:
+  `npx tsc --noEmit`, `npx jest --runInBand`, `npm run build`,
+  `npx js-yaml <compose>`, `sh -n docker-entrypoint.sh`
 - Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green;
   all 11 GraphQL documents verified against live schema; live endpoints:
   API `https://nft-api.steempro.com`, WS `wss://nft-ws.steempro.com`
