@@ -24,6 +24,16 @@ import {
   type TxStatus,
 } from '../types/domain';
 
+/**
+ * Sentinel for `putJournal(height, [])`: an empty block still has a journal, so the
+ * backends write this placeholder row instead of nothing — `getJournal` must never
+ * return `null` for a height that WAS journaled (null means "pruned / never seen",
+ * which the re-org path treats as a deep-fork error). Shared by MemoryStore and
+ * PrismaStateStore so both backends produce the identical shape.
+ */
+export const EMPTY_JOURNAL_ENTITY: EntityKind = 'meta';
+export const EMPTY_JOURNAL_KEY = '__journal_empty__';
+
 export interface ListInstancesQuery {
   owner?: string;
   symbol?: string;

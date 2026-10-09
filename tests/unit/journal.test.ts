@@ -1,6 +1,11 @@
 import { MemoryStore } from '../../src/state/memoryStore';
 import { applyUndo, GuardError, StateTxn } from '../../src/state/stateTxn';
-import { emptySnapshot, type Collection, type StateSnapshot } from '../../src/types/domain';
+import {
+  emptySnapshot,
+  type Collection,
+  type JournalEntry,
+  type StateSnapshot,
+} from '../../src/types/domain';
 
 const COLLECTION: Collection = {
   symbol: 'ATOM',
@@ -154,6 +159,55 @@ describe('undo journal (micro-fork reverse path)', () => {
     expect(await store.get('collection', 'ATOM')).toEqual(COLLECTION);
     expect(txn.entries).toHaveLength(2);
     await txn.rollbackAll();
+    expect(store.dump()).toEqual(baseline);
+  });
+});
+
+describe('journal storage contract (shared with PrismaStateStore)', () => {
+  let store: MemoryStore;
+
+  beforeEach(() => {
+    store = new MemoryStore();
+  });
+
+  afterEach(async () => {
+    await store.close();
+  });
+
+  const entries: JournalEntry[] = [
+    { seq: 0, entity: 'collection', key: 'ATOM', before: null },
+    { seq: 1, entity: 'meta', key: 'order_seq', before: '0' },
+  ];
+
+  it('an empty journal is the sentinel row, never null (null = pruned)', async () => {
+    expect(await store.getJournal(7)).toBeNull(); // never journaled
+    await store.putJournal(7, []);
+    expect(await store.getJournal(7)).toEqual([
+      { seq: 0, entity: 'meta', key: '__journal_empty__', before: null },
+    ]);
+  });
+
+  it('deleteJournalFrom removes that height and everything above', async () => {
+    await store.putJournal(7, entries);
+    await store.putJournal(8, entries);
+    await store.deleteJournalFrom(8);
+    expect(await store.getJournal(7)).toEqual(entries);
+    expect(await store.getJournal(8)).toBeNull();
+  });
+
+  it('pruneJournal keeps the keep height and drops everything below', async () => {
+    await store.putJournal(7, entries);
+    await store.putJournal(8, entries);
+    await store.pruneJournal(8);
+    expect(await store.getJournal(7)).toBeNull();
+    expect(await store.getJournal(8)).toEqual(entries);
+  });
+
+  it('undoing the sentinel is a harmless no-op', async () => {
+    await store.putJournal(7, []);
+    const loaded = (await store.getJournal(7)) as JournalEntry[];
+    const baseline = structuredClone(store.dump());
+    await applyUndo(store, loaded);
     expect(store.dump()).toEqual(baseline);
   });
 });

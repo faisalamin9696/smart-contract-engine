@@ -27,6 +27,7 @@ import type {
   ListOrdersQuery,
   ListTokensQuery,
 } from './store';
+import { EMPTY_JOURNAL_ENTITY, EMPTY_JOURNAL_KEY } from './store';
 
 const ENTITIES: EntityKind[] = [
   'collection',
@@ -200,6 +201,15 @@ export class MemoryStore implements EngineStore {
 
   async putJournal(height: number, entries: JournalEntry[]): Promise<void> {
     this.assertOpen();
+    if (entries.length === 0) {
+      // Empty block => sentinel entry, byte-identical to PrismaStateStore's row
+      // (see EMPTY_JOURNAL_KEY in store.ts): getJournal must never return null
+      // for a height that WAS journaled.
+      this.journals.set(height, [
+        { seq: 0, entity: EMPTY_JOURNAL_ENTITY, key: EMPTY_JOURNAL_KEY, before: null },
+      ]);
+      return;
+    }
     this.journals.set(height, entries.map((e, i) => ({ ...e, seq: i })));
   }
 

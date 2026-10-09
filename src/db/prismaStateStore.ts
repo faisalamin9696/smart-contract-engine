@@ -37,6 +37,7 @@ import type {
   ListOrdersQuery,
   ListTokensQuery,
 } from '../state/store';
+import { EMPTY_JOURNAL_ENTITY, EMPTY_JOURNAL_KEY } from '../state/store';
 
 type Client = PrismaClient | Prisma.TransactionClient;
 
@@ -61,15 +62,13 @@ const INDEX_LOCK_POLL_MS = 100;
 const INDEX_LOCK_TIMEOUT_MS = 55_000;
 
 /**
- * Sentinel journal row written when a block performed zero mutations.
- *
- * Without it, a "successfully applied but empty" block would be indistinguishable from a
- * journal that had been pruned away, so the re-org handler could either refuse to undo a
- * legitimate empty block or silently succeed on a pruned one. The sentinel undoes to a
- * harmless delete of a key that never exists.
+ * Sentinel journal row written when a block performed zero mutations — the shared
+ * constants live in `state/store.ts` (EMPTY_JOURNAL_KEY) so both backends produce the
+ * identical shape. Without it, a "successfully applied but empty" block would be
+ * indistinguishable from a journal that had been pruned away, so the re-org handler
+ * could either refuse to undo a legitimate empty block or silently succeed on a
+ * pruned one. The sentinel undoes to a harmless delete of a key that never exists.
  */
-const EMPTY_JOURNAL_ENTITY: EntityKind = 'meta';
-const EMPTY_JOURNAL_KEY = '__journal_empty__';
 
 /* ------------------------------------------------------------------ converters */
 /* Entity <-> row. Timestamps are stored as plain strings so values round-trip

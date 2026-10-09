@@ -361,8 +361,12 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await store.putJournal(H1, entries);
     expect(await store.getJournal(H1)).toEqual(entries);
 
-    await store.pruneJournal(H1);
+    // pruneJournal(keepFromHeight) KEEPS journals from that height up (undo-buffer
+    // semantics, indexer.ts) — everything below goes, the keep height itself stays.
+    await store.putJournal(H1 + 1, entries);
+    await store.pruneJournal(H1 + 1);
     expect(await store.getJournal(H1)).toBeNull();
+    expect(await store.getJournal(H1 + 1)).toEqual(entries);
   });
 
   it('commits a transaction atomically and rolls it back on failure', async () => {
