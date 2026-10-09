@@ -61,9 +61,17 @@ Environment differences from mainnet:
 ```dotenv
 SCE_OP_ID=sce-testnet1
 STORAGE=postgres
-# DATABASE_URL → the testnet Postgres service (NOT the mainnet one)
-# Domains (Traefik): https://nft-test.steempro.com → PORT 4000
-#                    wss://nft-test-ws.steempro.com → WS_PORT 4001
+DATABASE_URL=postgresql://<user>:<pass>@<testnet-db-host>:5432/<testnet-db>
+
+# Host ports MUST differ from mainnet — both stacks publish ports on the same
+# server (the compose maps ${PORT}:${PORT} and ${WS_PORT}:${WS_PORT}); reuse of
+# 4000/4001 fails with "port is already allocated".
+PORT=4010
+WS_PORT=4011
+
+# Domains tab → service `engine`:
+#   https://nft-test.steempro.com      → container port 4010  (REST + GraphQL)
+#   wss://nft-test-ws.steempro.com     → container port 4011  (WebSocket)
 ```
 
 Leave `START_BLOCK_HEIGHT` **unset**: the engine syncs to the current head in
@@ -118,8 +126,12 @@ repo (see `.env.local.example`).
 
 ```bash
 curl https://nft-test.steempro.com/health           # cursor ≈ head, sandbox=isolated-vm
-curl https://nft-test.steempro.com/api/v1/status    # opId=sce-testnet1, opsApplied ≥ 1 after genesis
+curl https://nft-test.steempro.com/api/v1/status    # stats.opsApplied ≥ 1 after genesis
 ```
+
+Confirm the engine is actually on the test namespace — the op id is **not** in
+`/status`; it is logged once at startup (Dokploy → service → Logs:
+`indexer started opId=sce-testnet1`).
 
 Then create a collection through the test frontend with any Steem account and
 watch `opsApplied` and `/collections` update. Confirm **isolation**: the same
