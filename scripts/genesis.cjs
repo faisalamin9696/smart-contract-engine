@@ -21,7 +21,7 @@
  *   STEEM_ACTIVE_WIF  active WIF of GENESIS_ACCOUNT  (required unless --dry-run)
  *   GENESIS_ACCOUNT   admin / treasury account       (default steempro.com)
  *   STEEM_RPC         Steem RPC endpoint             (default https://api.steemit.com)
- *   ENGINE_API        engine REST base URL           (default https://nft-api.steempro.com)
+ *   ENGINE_API        engine REST base URL           (default https://sce-api.steempro.com)
  */
 
 const { Client, PrivateKey } = require('@steempro/dsteem');
@@ -31,7 +31,7 @@ const { Client, PrivateKey } = require('@steempro/dsteem');
 const OP_ID = process.env.SCE_OP_ID || 'sce-mainnet1';
 const ACCOUNT = process.env.GENESIS_ACCOUNT || 'steempro.com';
 const STEEM_RPC = process.env.STEEM_RPC || 'https://api.steemit.com';
-const ENGINE_API = (process.env.ENGINE_API || 'https://nft-api.steempro.com').replace(/\/+$/, '');
+const ENGINE_API = (process.env.ENGINE_API || 'https://sce-api.steempro.com').replace(/\/+$/, '');
 const POLL_MS = 3000;
 const STEP_TIMEOUT_MS = 120000;
 

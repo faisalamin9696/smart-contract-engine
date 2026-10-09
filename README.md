@@ -7,7 +7,7 @@ A production-oriented Node.js/TypeScript service that indexes Steem `custom_json
 operations (`id = sce-mainnet1`), executes them inside a sandboxed deterministic VM, keeps
 an off-chain state database, and exposes that state through REST, GraphQL and WebSocket.
 
-*The protocol is branded **SCE**; the **SteemCraft** dApps (NFT frontend) build on top of it.*
+*The protocol is branded **SCE**; the NFT frontend dApps build on top of it.*
 
 ```
  Steem RPC (failover)          engine process                      clients
@@ -109,14 +109,19 @@ resolves and Traefik can reach the engine). Step-by-step: **[docs/DOKPLOY.md](do
 ```bash
 curl localhost:4000/health
 {"status":"ok","uptimeSeconds":12,"storage":"postgres",
- "indexer":{"running":true,"headHeight":123_456_789,"cursorHeight":123_456_789,"sandbox":"isolated-vm"}}
+ "indexer":{"running":true,"headHeight":123_456_789,"cursorHeight":123_456_789,
+            "sandbox":"isolated-vm","opId":"sce-mainnet1"}}
 ```
+
+`opId` is the `custom_json` namespace this instance consumes — the authoritative
+"which network am I talking to" field (`sce-mainnet1` = production,
+`sce-testnet1` = [testnet](docs/TESTNET.md)).
 
 ### REST (`GET /api/v1/...`)
 
 | Route | Purpose |
 | --- | --- |
-| `/status` | cursor, head, sandbox provider, ingest statistics |
+| `/status` | op id (namespace), cursor, head, sandbox provider, ingest statistics |
 | `/collections?limit&offset` | all collections |
 | `/collections/:symbol` · `/collections/:symbol/instances` | collection detail / inventory |
 | `/instances?owner&symbol&limit&offset` · `/instances/:id` · `/instances/:symbol/:id` | filtered inventory |

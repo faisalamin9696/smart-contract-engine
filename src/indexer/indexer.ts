@@ -94,6 +94,10 @@ export class Indexer {
       running: this.running,
       headHeight: this.headHeight,
       sandbox: this.sandbox.provider,
+      // Self-identification: which custom_json namespace this instance consumes.
+      // The API never lets you guess whether you're talking to mainnet
+      // (sce-mainnet1) or a testnet (sce-testnet1).
+      opId: this.opts.opId,
       buffer: { undoDepth: this.opts.undoBufferDepth, redoSize: this.reorg.redoSize },
       stats: { ...this.stats },
     };

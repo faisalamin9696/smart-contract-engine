@@ -307,6 +307,8 @@ const typeDefs = /* GraphQL */ `
   }
 
   type EngineStatus {
+    "custom_json namespace this instance consumes (e.g. sce-mainnet1, sce-testnet1)"
+    opId: String!
     running: Boolean!
     headHeight: Int!
     cursorHeight: Int!
@@ -502,6 +504,7 @@ function buildResolvers() {
           running: boolean;
           headHeight: number;
           sandbox: string;
+          opId: string;
           buffer: { undoDepth: number; redoSize: number };
           stats: Record<string, number | string | null>;
         };
@@ -510,6 +513,7 @@ function buildResolvers() {
           running: status.running,
           headHeight: status.headHeight,
           cursorHeight: cursor?.height ?? 0,
+          opId: status.opId,
           sandbox: status.sandbox,
           storage: ctx.storage,
           undoDepth: status.buffer.undoDepth,

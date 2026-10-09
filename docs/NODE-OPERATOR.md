@@ -135,7 +135,8 @@ distribution mechanism this project supports.
 # 1) alive and progressing
 curl https://your-host/health
 
-# 2) ingest stats (blocksApplied, reorgs, sandbox provider in use)
+# 2) op id (namespace: sce-mainnet1 / sce-testnet1) + ingest stats
+#    (blocksApplied, reorgs, sandbox provider in use)
 curl https://your-host/api/v1/status
 
 # 3) state fingerprint — must match a reference node AT THE SAME HEIGHT

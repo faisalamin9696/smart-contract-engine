@@ -221,13 +221,13 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     expect(await health.json()).toMatchObject({
       status: 'ok',
       storage: 'memory',
-      indexer: { running: false, cursorHeight: 4 },
+      indexer: { running: false, cursorHeight: 4, opId: 'sce-mainnet1' },
     });
 
     const status = await fetch(`${base}/api/v1/status`);
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({
-      data: { cursorHeight: 4, storage: 'memory', headHeight: 4 },
+      data: { cursorHeight: 4, storage: 'memory', headHeight: 4, opId: 'sce-mainnet1' },
     });
   });
 
@@ -378,6 +378,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
           owner
         }
         status {
+          opId
           storage
           cursorHeight
           sandbox
@@ -407,7 +408,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
         { id: 'ORD-00000001', instanceId: 'RAID:1', price: '12.345', status: 'OPEN', instance: { id: '1' } },
       ],
       instance: { id: '1', owner: 'carol' },
-      status: { storage: 'memory', cursorHeight: 4 },
+      status: { opId: 'sce-mainnet1', storage: 'memory', cursorHeight: 4 },
     });
   });
 

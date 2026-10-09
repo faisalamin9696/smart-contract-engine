@@ -96,7 +96,7 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
   app.use(createRateLimiter({ rpm: config.rateLimitRpm }));
 
   app.get('/health', async (_req: Request, res: Response) => {
-    const status = indexer.status() as { running: boolean; headHeight: number; sandbox: string };
+    const status = indexer.status() as { running: boolean; headHeight: number; sandbox: string; opId: string };
     const cursor = await indexer.cursor().catch(() => null);
     res.json({
       status: 'ok',
@@ -107,6 +107,7 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
         headHeight: status.headHeight,
         cursorHeight: cursor?.height ?? 0,
         sandbox: status.sandbox,
+        opId: status.opId,
       },
     });
   });

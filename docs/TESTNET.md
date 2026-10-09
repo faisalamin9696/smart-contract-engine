@@ -1,7 +1,7 @@
 # Testnet (`sce-testnet1`)
 
 A second, fully isolated engine you can break without touching mainnet — served
-at `nft-test.steempro.com` (API) for developers and CI.
+at `sce-test.steempro.com` (API) for developers and CI.
 
 Related: [NODE-OPERATOR.md](NODE-OPERATOR.md) (running a node),
 [SECURITY.md](SECURITY.md), [TOKENS-DESIGN.md](TOKENS-DESIGN.md) (genesis
@@ -24,7 +24,7 @@ operations and hold completely separate state:
               ┌────────▼────────┐  ┌───────▼─────────┐
               │ mainnet engine  │  │ testnet engine  │
               │ own Postgres    │  │ own Postgres    │
-              │ nft-api.…       │  │ nft-test.…      │
+              │ sce-api.…       │  │ sce-test.…      │
               └─────────────────┘  └─────────────────┘
 ```
 
@@ -46,8 +46,8 @@ SCE value — the testnet ledger is a different world.
 | | Mainnet | Testnet |
 | --- | --- | --- |
 | `SCE_OP_ID` | `sce-mainnet1` | `sce-testnet1` |
-| API | `https://nft-api.steempro.com` | `https://nft-test.steempro.com` |
-| WebSocket | `wss://nft-ws.steempro.com` | `wss://nft-test-ws.steempro.com` |
+| API | `https://sce-api.steempro.com` | `https://sce-test.steempro.com` |
+| WebSocket | `wss://sce-ws.steempro.com` | `wss://sce-test-ws.steempro.com` |
 | Frontend | production build | build with test env (below) |
 | Database | dedicated Postgres | **separate** dedicated Postgres |
 | Genesis | `scripts/genesis.cjs` (done 2026-10-09) | same script, `SCE_OP_ID=sce-testnet1` |
@@ -70,8 +70,8 @@ PORT=4010
 WS_PORT=4011
 
 # Domains tab → service `engine`:
-#   https://nft-test.steempro.com      → container port 4010  (REST + GraphQL)
-#   wss://nft-test-ws.steempro.com     → container port 4011  (WebSocket)
+#   https://sce-test.steempro.com      → container port 4010  (REST + GraphQL)
+#   wss://sce-test-ws.steempro.com     → container port 4011  (WebSocket)
 ```
 
 Leave `START_BLOCK_HEIGHT` **unset**: the engine syncs to the current head in
@@ -85,7 +85,7 @@ running (or you must point it below the genesis height):
 
 ```powershell
 # 1) inspect what will be broadcast (no transaction sent)
-$env:SCE_OP_ID='sce-testnet1'; $env:ENGINE_API='https://nft-test.steempro.com'
+$env:SCE_OP_ID='sce-testnet1'; $env:ENGINE_API='https://sce-test.steempro.com'
 node scripts/genesis.cjs --dry-run
 
 # 2) broadcast for real (active key of GENESIS_ACCOUNT, default steempro.com)
@@ -106,11 +106,11 @@ replaying from below that height inherits the same fee schedule and treasury.
 
 ## 3. Test frontend
 
-A second frontend deployment (any domain, e.g. `nft-test-ui.steempro.com`) with:
+A second frontend deployment (any domain, e.g. `sce-test-ui.steempro.com`) with:
 
 ```dotenv
-NEXT_PUBLIC_NFT_API=https://nft-test.steempro.com
-NEXT_PUBLIC_NFT_WS=wss://nft-test-ws.steempro.com
+NEXT_PUBLIC_NFT_API=https://sce-test.steempro.com
+NEXT_PUBLIC_NFT_WS=wss://sce-test-ws.steempro.com
 NEXT_PUBLIC_CUSTOM_JSON_ID=sce-testnet1
 NEXT_PUBLIC_DEMO_DATA=0
 ```
@@ -125,17 +125,20 @@ repo (see `.env.local.example`).
 ## 4. Verify
 
 ```bash
-curl https://nft-test.steempro.com/health           # cursor ≈ head, sandbox=isolated-vm
-curl https://nft-test.steempro.com/api/v1/status    # stats.opsApplied ≥ 1 after genesis
+curl https://sce-test.steempro.com/health           # cursor ≈ head, sandbox=isolated-vm, indexer.opId=sce-testnet1
+curl https://sce-test.steempro.com/api/v1/status    # data.opId=sce-testnet1; stats.opsApplied ≥ 1 after genesis
 ```
 
-Confirm the engine is actually on the test namespace — the op id is **not** in
-`/status`; it is logged once at startup (Dokploy → service → Logs:
+Confirm the engine is actually on the test namespace: `GET /health`,
+`GET /api/v1/status` and the GraphQL `status` query all expose the namespace as
+**`opId`** — a testnet instance must report `sce-testnet1` (mainnet reports
+`sce-mainnet1`). That one field is the proof; an empty `tokens` list alone is
+ambiguous. The value is also logged once at startup (Dokploy → service → Logs:
 `indexer started opId=sce-testnet1`).
 
 Then create a collection through the test frontend with any Steem account and
 watch `opsApplied` and `/collections` update. Confirm **isolation**: the same
-transaction does not appear on `nft-api.steempro.com`.
+transaction does not appear on `sce-api.steempro.com`.
 
 ## 5. Resetting the testnet
 

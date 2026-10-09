@@ -104,6 +104,7 @@ export function createRestRouter(deps: RestDeps): Router {
         running: boolean;
         headHeight: number;
         sandbox: string;
+        opId: string;
         buffer: { undoDepth: number; redoSize: number };
         stats: Record<string, number | string | null>;
       };
@@ -114,6 +115,7 @@ export function createRestRouter(deps: RestDeps): Router {
           headHeight: status.headHeight,
           cursorHeight: cursor?.height ?? 0,
           cursorBlockId: cursor?.blockId ?? null,
+          opId: status.opId,
           sandbox: status.sandbox,
           storage,
           undoDepth: status.buffer.undoDepth,

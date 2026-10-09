@@ -59,8 +59,8 @@ Compose reads these for `${...}` interpolation *and* injects them into the conta
 
 | Domain | Container port | Serves |
 | --- | --- | --- |
-| `nft-api.example.com` | `4000` | `GET /health`, `/api/v1/*`, `POST /graphql` |
-| `nft-ws.example.com` | `4001` | WebSocket (`wss://`) |
+| `sce-api.example.com` | `4000` | `GET /health`, `/api/v1/*`, `POST /graphql` |
+| `sce-ws.example.com` | `4001` | WebSocket (`wss://`) |
 
 Traefik proxies WebSocket transparently, so no extra configuration is needed. Create the
 two DNS `A` records before deploying (certificates take ~10 s after the first request).
@@ -88,14 +88,14 @@ engine   → http server listening / websocket server listening / indexer starte
 Verify:
 
 ```bash
-curl -s https://nft-api.example.com/health
+curl -s https://sce-api.example.com/health
 # {"status":"ok","storage":"postgres","indexer":{"running":true,...}}
 
-curl -s https://nft-api.example.com/graphql -H 'content-type: application/json' \
+curl -s https://sce-api.example.com/graphql -H 'content-type: application/json' \
      -d '{"query":"{ status { running cursorHeight sandbox storage stats { blocksApplied } } }"}'
 ```
 
-WebSocket: connect to `wss://nft-ws.example.com` and send
+WebSocket: connect to `wss://sce-ws.example.com` and send
 `{"type":"subscribe","channels":["account:alice","market"]}`.
 
 ## 5. Day-2

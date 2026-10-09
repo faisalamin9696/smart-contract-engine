@@ -239,7 +239,7 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
   SCE to `steempro.com` (treasury), then raise the schedule via `setParam`
   (exact payloads in the Genesis runbook above).
 - **Protocol identity / op id** *(confirmed 2026-10-08)*: the engine is branded
-  **SCE — Smart Contract Engine**; the frontend keeps **SteemCraft**;
+  **SCE — Smart Contract Engine**; the frontend keeps its own brand;
   `custom_json` id **`sce-mainnet1`** (env `SCE_OP_ID`; convention =
   `prefix-env-generation` after upstream `ssc-mainnet1`). Legacy `steem_nft_v1`
   is **not** kept — pre-release is a closed stage, the state DB may be wiped, and
@@ -297,8 +297,8 @@ a full audit pass over the trust boundaries plus the pieces an outside operator 
 - Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green after
   step 6 (rebuilt with `NEXT_PUBLIC_CUSTOM_JSON_ID=sce-mainnet1` inlined);
   new + renamed GraphQL documents probed against live schema 2026-10-09;
-  live endpoints: API `https://nft-api.steempro.com`,
-  WS `wss://nft-ws.steempro.com` (also `nss-ws`), engine healthy
+  live endpoints: API `https://sce-api.steempro.com`,
+  WS `wss://sce-ws.steempro.com`, engine healthy
   (cursor == head, postgres, isolated-vm)
 - **Done 2026-10-09 (pre-release reset)**: migration `0005_reset_legacy_state`
   deployed via Dokploy (all legacy test state wiped: old-id genesis, ARCHERS,
