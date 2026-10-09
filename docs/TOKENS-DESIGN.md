@@ -101,13 +101,28 @@ is still running pre-step-3 code or rejects an op — step 3 never runs unless S
 The fee schedule is therefore **live in production** (20 SCE create fees); further SCE
 distribution happens from the treasury (`tokens.issue` stays free while `issueFee = 0`).
 
-> **Rebrand note (2026-10-08):** the execution above went out under the legacy id
-> `steem_nft_v1`. The engine is now branded **SCE — Smart Contract Engine** with id
-> **`sce-mainnet1`**, and legacy ids are *not* parsed — so when the state DB is reset
-> pre-release, re-run this runbook as-is (`node scripts/genesis.cjs`, already updated:
-> id `sce-mainnet1`, token name "Smart Contract Engine"); optionally set
-> `START_BLOCK_HEIGHT` just below the reset head first. The three ops above then remain
-> permanently unparsed history.
+> **Rebrand note (2026-10-08) / pre-release reset (2026-10-09):** the execution above
+> went out under the legacy id `steem_nft_v1`. The engine is now branded **SCE —
+> Smart Contract Engine** with id **`sce-mainnet1`**, and legacy ids are *not*
+> parsed — so the state DB is wiped by migration **`0005_reset_legacy_state`**,
+> which applies automatically on the next deploy (the entrypoint runs
+> `prisma migrate deploy`): it truncates every state table and re-seeds the
+> all-zero `param` bootstrap row. After that deploy:
+>
+> 1. wait for the engine to report `cursor == head` (`GET /api/v1/status`) — with
+>    an empty DB it cold-starts at the *current* head, so leave
+>    `START_BLOCK_HEIGHT` unset;
+> 2. re-run this runbook as-is (`node scripts/genesis.cjs` — already updated: id
+>    `sce-mainnet1`, token name "Smart Contract Engine"; the raised schedule must
+>    not be seeded directly, the `tokens.create` genesis op could not pay its own
+>    fee);
+> 3. verify: `/api/v1/tokens` (SCE, "Smart Contract Engine"), `/api/v1/params`
+>    (20/20/20/0/200 bps), treasury balance 1,000,000, and the old rows gone
+>    (e.g. the legacy `ARCHERS` test collection).
+>
+> Never broadcast genesis *before* the engine's first boot against the fresh DB —
+> ops landing below the cold-start height would never be ingested. The three ops
+> executed on 2026-10-08 then remain permanently unparsed history.
 
 ## Key architectural decisions
 
@@ -228,7 +243,11 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
 ## Repo state at handoff
 
 - Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
-  (private), main with build-order steps 1–6 + genesis helper; gates before push:
+  (private), main with build-order steps 1–6 + genesis helper + the pre-release
+  reset migration `0005_reset_legacy_state` (truncates all state tables and
+  re-seeds the all-zero `param` bootstrap; applies on the next deploy via the
+  entrypoint's `prisma migrate deploy`; guarded by
+  `tests/unit/resetMigration.test.ts`); gates before push:
   `npx tsc --noEmit`, `npx jest --runInBand`, `npm run build`,
   `npx js-yaml <compose>`, `sh -n docker-entrypoint.sh`
 - Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green after
@@ -237,7 +256,10 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
   live endpoints: API `https://nft-api.steempro.com`,
   WS `wss://nft-ws.steempro.com` (also `nss-ws`), engine healthy
   (cursor == head, postgres, isolated-vm)
-- **Still pending**: first e2e NFT test from the frontend (`create` →
-  `/collections`) — now unblocked, everything it needs has shipped
+- **Still pending**: deploy the next release (Dokploy → Deploy) so migration
+  `0005_reset_legacy_state` wipes the legacy test state, then re-run
+  `node scripts/genesis.cjs` (needs `STEEM_ACTIVE_WIF` of `steempro.com`) once
+  `/api/v1/status` shows `cursor == head` — Genesis runbook above; then the
+  first e2e NFT test from the frontend (`create` → `/collections`)
 - Housekeeping: stray `limit` file in `E:\SteemNft` root; frontend git init;
   DB password rotation (old repo history); CI with postgres service
