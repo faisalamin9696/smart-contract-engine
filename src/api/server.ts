@@ -9,6 +9,7 @@ import type { EngineEventBus } from '../indexer/events';
 import type { Indexer } from '../indexer/indexer';
 import type { EngineStore } from '../state/store';
 import { createGraphQL, type GraphQLHandle } from './graphql';
+import { createRateLimiter } from './rateLimit';
 import { createRestRouter, restErrorHandler } from './rest';
 import { WebSocketHub } from './ws';
 
@@ -66,7 +67,13 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
 
   const app: Express = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  // Recover the real client IP from X-Forwarded-For trusting exactly one proxy hop.
+  // `true` (trust every hop) would let a client spoof its way past the rate limiter by
+  // prepending its own X-Forwarded-For values; a hop count cannot be spoofed.
+  app.set('trust proxy', config.trustProxyHops);
+
+  // Per-IP request budget over REST + GraphQL + discovery (/health is exempt).
+  app.use(createRateLimiter({ rpm: config.rateLimitRpm }));
 
   app.get('/health', async (_req: Request, res: Response) => {
     const status = indexer.status() as { running: boolean; headHeight: number; sandbox: string };
@@ -89,7 +96,9 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
       name: 'sce-engine',
       api: {
         health: 'GET /health',
-        rest: config.restEnabled ? 'GET /api/v1/{collections,instances,accounts,orders,logs,blocks,status}' : null,
+        rest: config.restEnabled
+          ? 'GET /api/v1/{collections,instances,accounts,orders,logs,blocks,status,state-checksum}'
+          : null,
         graphql: config.graphqlEnabled ? `POST ${config.graphqlPath}` : null,
         websocket: {
           port: config.wsPort,
@@ -126,7 +135,11 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
   const httpPort = config.restEnabled || config.graphqlEnabled ? await listen(server, config.port) : null;
   if (httpPort !== null) log.info('http server listening', { port: httpPort, graphql: config.graphqlEnabled, rest: config.restEnabled });
 
-  const hub = new WebSocketHub(bus, { port: config.wsPort }, logger);
+  const hub = new WebSocketHub(
+    bus,
+    { port: config.wsPort, maxClients: config.wsMaxClients },
+    logger,
+  );
   try {
     await hub.ready;
   } catch (error) {

@@ -33,6 +33,25 @@ export interface Config {
   readonly sandboxMemoryLimitMb: number;
   readonly failOnDeepFork: boolean;
   readonly logLevel: LogLevel;
+  /**
+   * Cross-endpoint block verification window: blocks within this many heights of the
+   * known head are fetched from a second RPC endpoint and compared byte-for-byte
+   * (fingerprint) before being applied. 0 disables quorum verification; when only one
+   * endpoint is configured it is skipped (nothing to compare against).
+   */
+  readonly quorumVerifyDepth: number;
+  /** Per-IP HTTP request budget (requests/minute, token bucket). 0 disables the limiter. */
+  readonly rateLimitRpm: number;
+  /**
+   * How many reverse-proxy hops sit in front of the HTTP server. Express uses this to
+   * recover the real client IP from X-Forwarded-For; `1` (default) is correct behind a
+   * single proxy (Traefik/Dokploy) and irrelevant when the engine is directly exposed
+   * (no header → socket address). Unlike `trust proxy: true` this cannot be spoofed by
+   * a client prepending its own X-Forwarded-For values.
+   */
+  readonly trustProxyHops: number;
+  /** Hard cap on simultaneous WebSocket connections. */
+  readonly wsMaxClients: number;
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -142,5 +161,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sandboxMemoryLimitMb: int('SANDBOX_MEMORY_LIMIT_MB', 128, 16),
     failOnDeepFork: bool('FAIL_ON_DEEP_FORK', true),
     logLevel: level,
+    quorumVerifyDepth: int('QUORUM_VERIFY_DEPTH', 50, 0),
+    rateLimitRpm: int('RATE_LIMIT_RPM', 600, 0),
+    trustProxyHops: int('TRUST_PROXY_HOPS', 1, 0),
+    wsMaxClients: int('WS_MAX_CLIENTS', 500, 1),
   });
 }

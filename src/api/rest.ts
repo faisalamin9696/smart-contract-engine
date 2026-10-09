@@ -10,6 +10,7 @@ import {
   getToken,
   type EngineStore,
 } from '../state/store';
+import { computeStateChecksum } from './checksum';
 import type { Logger } from '../logger';
 
 export interface RestDeps {
@@ -332,6 +333,21 @@ export function createRestRouter(deps: RestDeps): Router {
       const block = await store.getBlock(height);
       if (!block) throw httpError(404, 'NOT_FOUND', 'block not found');
       res.json({ data: block });
+    }),
+  );
+
+  // ---- cross-node verification ---------------------------------------------
+
+  /**
+   * Deterministic fingerprint of the committed ledger (docs/NODE-OPERATOR.md):
+   * operators running their own engine compare this against a reference node at the
+   * same cursor height to prove their state matches the network — no trust required.
+   * Full-table digest, so treat it as a verification call, not a hot path.
+   */
+  router.get(
+    '/state-checksum',
+    wrap(async (_req, res) => {
+      res.json({ data: await computeStateChecksum(store, indexer, storage) });
     }),
   );
 

@@ -26,6 +26,11 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
                        └───────────────────────────┘
 ```
 
+**Guides:** [Run your own node](docs/NODE-OPERATOR.md) ·
+[Security & threat model](docs/SECURITY.md) ·
+[Deployment](docs/DEPLOYMENT.md) · [Dokploy](docs/DOKPLOY.md) ·
+[Tokens design](docs/TOKENS-DESIGN.md) · [License](LICENSE) (MIT)
+
 ## What it does
 
 | Concern | Implementation |
@@ -38,7 +43,7 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 | State integrity | sandbox returns *declarative mutations*; the host re-validates schema, entity allowlist (per contract), immutable fields, read-set integrity (unread-write / stale-read guards), supply/burn/groupBy invariants, fungible token invariants + the ledger **conservation invariant** (balance deltas must equal the supply delta per op), typed property rules and order finality (`src/vm/guard.ts`) |
 | Atomicity | one DB transaction per block: state + journal + logs + cursor commit together; advisory lock (`pg_advisory_xact_lock`) serialises block processing across replicas |
 | APIs | REST + GraphQL (Apollo Server 5) + WebSocket channels |
-| Tests | 141 tests across 15 suites (deterministic execution, wiki action semantics for all contracts, the fee engine, marketplace settlement, guards, journal, parser) + integration suites for micro-fork rollbacks, the API surface, and an opt-in Postgres parity suite |
+| Tests | 185 tests across 19 suites (deterministic execution, wiki action semantics for all contracts, the fee engine, marketplace settlement, guards, journal, parser, **RPC quorum verification, state-checksum fingerprints, rate limiting**) + integration suites for micro-fork rollbacks, the API surface, and the Postgres parity suite (incl. **cross-backend checksum equality**) |
 
 ## Quick start
 
@@ -117,6 +122,7 @@ curl localhost:4000/health
 | `/params` | admin, treasury and the in-state fee schedule |
 | `/logs?actor&instanceId&symbol&height&status&limit&offset` | execution history |
 | `/blocks/latest` · `/blocks/:height` | indexed block cursor |
+| `/state-checksum` | SHA-256 fingerprints of the whole ledger — cross-node verification (see [docs/NODE-OPERATOR.md](docs/NODE-OPERATOR.md)) |
 
 ```bash
 curl 'localhost:4000/api/v1/instances?owner=alice&limit=10'
@@ -338,6 +344,10 @@ extension — upstream they live in a separate `market` contract.
 | `SANDBOX_PROVIDER` | `auto` | `isolated-vm`, `node-vm` fallback |
 | `SANDBOX_TIMEOUT_MS` / `SANDBOX_MEMORY_LIMIT_MB` | `1000` / `128` | per-execution limits |
 | `FAIL_ON_DEEP_FORK` | `true` | halt vs. warn on forks beyond the buffer |
+| `QUORUM_VERIFY_DEPTH` | `50` | head-window (in blocks) cross-checked against a second RPC endpoint before a block is applied; 0 = off, deep sync exempt, single endpoint ignored (see [docs/SECURITY.md](docs/SECURITY.md)) |
+| `RATE_LIMIT_RPM` | `600` | per-IP HTTP budget for REST + GraphQL (token bucket; `/health` exempt; 0 = off) |
+| `TRUST_PROXY_HOPS` | `1` | reverse-proxy hops for X-Forwarded-For (spoof-proof fixed hop count) |
+| `WS_MAX_CLIENTS` | `500` | hard cap on simultaneous WebSocket connections (0 = unlimited) |
 | `LOG_LEVEL` | `info` | `debug \| info \| warn \| error` |
 
 ## Testing
@@ -362,6 +372,7 @@ npx jest --runInBand tests/integration/postgresStore.test.ts
 ```
 src/
   api/        graphql.ts · rest.ts · ws.ts · server.ts      HTTP + WS surfaces
+              rateLimit.ts · checksum.ts                    per-IP limiter, state fingerprints
   chain/      rpc.ts · blockStreamer.ts · opParser.ts · reorg.ts
   db/         prisma.ts · prismaStateStore.ts               PostgreSQL EngineStore
   indexer/    indexer.ts · events.ts                        ingestion orchestration, event bus
@@ -384,8 +395,11 @@ tests/        unit/ · integration/ · helpers/
   the failover client rotates past them with exponential cooldown and logs
   `rpc endpoint recovered` on success. If ingestion looks stalled, check `GET /health`
   (`cursorHeight` vs `headHeight`) before assuming an engine fault.
-* The API is read-only and unauthenticated; rate limiting and auth are expected at the
-  ingress layer.
+* The API is read-only and unauthenticated; per-IP rate limiting is built in
+  (`RATE_LIMIT_RPM`), heavier abuse control belongs at the ingress layer. Block
+  ingestion cross-checks endpoints near the head (quorum), but witness signatures are
+  not verified — see [docs/SECURITY.md](docs/SECURITY.md) for the full threat model
+  and known limitations.
 * One engine instance should own the ingestion cursor per database (the advisory lock
   makes a second instance safe but idle).
 

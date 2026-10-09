@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as vm from 'node:vm';
+import type { Logger } from '../logger';
 import type { ContractName } from '../types/actions';
 import type { EngineEvent, StateSnapshot } from '../types/domain';
 import { CONTRACT_SOURCE } from './contractSource';
@@ -66,6 +67,12 @@ export interface SandboxOptions {
    * Production always uses {@link CONTRACT_SOURCE}.
    */
   contractSource?: string;
+  /**
+   * Optional structured logger — used to announce an `auto` fallback from isolated-vm
+   * to node-vm loudly instead of degrading silently (operators should know which
+   * isolation level their node is actually running).
+   */
+  logger?: Pick<Logger, 'warn'>;
 }
 
 const BLOCKED_GLOBALS = [
@@ -274,7 +281,12 @@ export async function createSandbox(options: SandboxOptions): Promise<Sandbox> {
       return await IsolatedVmSandbox.create(source, { ...options, bootstrapTimeoutMs });
     } catch (err) {
       if (options.provider === 'isolated-vm') throw err;
-      // auto: silently degrade to the node-vm provider with identical contract semantics.
+      // auto: fall back to the node-vm provider with identical contract semantics —
+      // but say so loudly; a production operator deserves to know their node is not
+      // running the hardened isolate (health/`sandbox` reports the live provider too).
+      options.logger?.warn('isolated-vm unavailable — degrading to node-vm sandbox', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return new NodeVmSandbox(source, { ...options, bootstrapTimeoutMs });

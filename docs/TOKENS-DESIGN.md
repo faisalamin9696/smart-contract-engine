@@ -247,6 +247,39 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
   "Smart Contract Engine"; the ops executed on 2026-10-08 then stay permanently
   unparsed).
 
+## Security hardening & multi-node readiness (2026-10-09)
+
+Answering "are we done on security, and can other developers run their own node?" —
+a full audit pass over the trust boundaries plus the pieces an outside operator needs:
+
+- **Audit findings → fixes shipped**
+  - authority derivation was already chain-derived (`required_auths`/`required_posting_auths`,
+    never payload) and every mutating VM action is authority-gated — verified action by
+    action, no gaps; host guard + conservation double-check every mutation;
+  - **no cross-endpoint block verification** → `FailoverRpc` quorum: blocks within
+    `QUORUM_VERIFY_DEPTH` (50) of the head are fingerprint-compared against a second
+    endpoint, a third breaks ties by majority (dissenter cooled down), an
+    unresolvable split throws `QUORUM_DISAGREE` and **stalls instead of applying a
+    possibly fabricated block**; malformed payloads rotate the endpoint out;
+  - **no rate limiting + spoofable `trust proxy: true`** → per-IP token bucket
+    (`RATE_LIMIT_RPM`, 600/min, `/health` exempt) behind a fixed `TRUST_PROXY_HOPS`
+    hop count a client cannot spoof via `X-Forwarded-For`;
+  - **unbounded WS clients** → `WS_MAX_CLIENTS` (500) cap; **silent sandbox degrade**
+    → loud warn at boot when `auto` falls back to node-vm.
+- **Cross-node verification**: `GET /api/v1/state-checksum` — deterministic per-entity
+  SHA-256 over collections/instances/tokens/balances/orders/param/`order_seq`
+  (all rows are block-derived; the schema stores no host-clock time), at the cursor
+  height; parity suite asserts Memory ↔ Postgres **checksum equality**.
+- **Docs**: `docs/SECURITY.md` (threat model, verified layers, honest known
+  limitations — no witness-signature verification yet, deep-replay trust window,
+  centralized admin key) and `docs/NODE-OPERATOR.md` (run your own node: install,
+  sync semantics incl. the canonical `START_BLOCK_HEIGHT=110282600` replay,
+  checksum verification playbook, upgrades, contribution gates).
+- **`LICENSE`** added (README said MIT but no license file existed — without it the
+  code was effectively all-rights-reserved, which blocks outside contribution).
+- Tests: +26 unit (quorum behaviour matrix, limiter, checksum) +1 parity
+  (checksum equality) → local 178 passed / 7 skipped, CI 185/185.
+
 ## Repo state at handoff
 
 - Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
@@ -259,8 +292,8 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
 - CI (since 2026-10-09): `.github/workflows/ci.yml` runs on push/PR —
   postgres:16 service, prisma validate, typecheck, full jest **including the
   Postgres parity suite** (`TEST_DATABASE_URL`), build, js-yaml, `sh -n`
-  entrypoint; latest run green (16/16 suites, 157/157 tests, 0 skipped).
-  Local Windows run stays at 151 passed / 6 skipped (parity needs a DB)
+  entrypoint; latest run green (19/19 suites, 185/185 tests, 0 skipped).
+  Local Windows run: 178 passed / 7 skipped (parity needs a DB)
 - Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green after
   step 6 (rebuilt with `NEXT_PUBLIC_CUSTOM_JSON_ID=sce-mainnet1` inlined);
   new + renamed GraphQL documents probed against live schema 2026-10-09;

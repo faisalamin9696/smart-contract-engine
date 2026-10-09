@@ -3,7 +3,9 @@ import path from 'node:path';
 
 import { PrismaClient } from '@prisma/client';
 
+import { computeStateChecksum } from '../../src/api/checksum';
 import { PrismaStateStore } from '../../src/db/prismaStateStore';
+import type { Indexer } from '../../src/indexer/indexer';
 import { MemoryStore } from '../../src/state/memoryStore';
 import type { EngineStore } from '../../src/state/store';
 import type {
@@ -290,6 +292,35 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await store.delete('meta', 'order_seq');
     expect(await store.get('meta', 'order_seq')).toBeNull();
     await store.put('meta', 'order_seq', '1');
+  });
+
+  it('computes the identical state checksum as MemoryStore (cross-node verification)', async () => {
+    // Two nodes syncing the same blocks must fingerprint their state identically —
+    // this is the primitive operators use to verify a freshly synced node
+    // (docs/NODE-OPERATOR.md). Same rows through both back-ends ⇒ same digest.
+    const accounts = { name: 'tstalice', createdAtBlock: H1, createdAt: '2026-01-01T00:00:00' };
+    const fixture = async (target: EngineStore): Promise<void> => {
+      await target.put('collection', 'TST', collection('TST'));
+      await target.put('instance', 'TST:1', instance('1', 'TST', 1, 'tstbob'));
+      await target.put('instance', 'TST:2', instance('2', 'TST', 2, 'tstcarol'));
+      await target.put('account', 'tstalice', accounts);
+      await target.put('order', 'ORD-TST0001', order('ORD-TST0001', 'TST', 'TST:1', 'tstbob', H1));
+      await target.put('token', 'TST', token('TST'));
+      await target.put('token', 'TSZ', token('TSZ'));
+      await target.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
+      await target.put('balance', 'tstcarol:TST', balance('tstcarol', 'TST', '1.000'));
+    };
+    await fixture(store);
+    await fixture(reference);
+
+    const indexer = { cursor: async () => ({ height: H1, blockId: 'fixture' }) } as unknown as Indexer;
+    const fromPostgres = await computeStateChecksum(store, indexer, 'postgres');
+    const fromMemory = await computeStateChecksum(reference, indexer, 'memory');
+
+    expect(fromMemory.height).toBe(H1);
+    expect(fromPostgres.height).toBe(fromMemory.height);
+    expect(fromPostgres.entities).toEqual(fromMemory.entities);
+    expect(fromPostgres.checksum).toBe(fromMemory.checksum);
   });
 
   it('matches MemoryStore on filtered, ordered and paginated reads', async () => {

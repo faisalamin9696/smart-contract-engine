@@ -55,6 +55,7 @@ async function main(): Promise<void> {
     provider: config.sandboxProvider,
     timeoutMs: config.sandboxTimeoutMs,
     memoryLimitMb: config.sandboxMemoryLimitMb,
+    logger,
   });
   logger.info('contract sandbox ready', { provider: sandbox.provider });
 
@@ -62,6 +63,7 @@ async function main(): Promise<void> {
   const rpc = new FailoverRpc(config.rpcEndpoints, {
     timeoutMs: 15_000,
     cooldownMs: 30_000,
+    quorumDepth: config.quorumVerifyDepth,
     logger,
   });
 

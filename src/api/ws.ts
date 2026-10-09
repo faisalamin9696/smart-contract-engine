@@ -13,6 +13,8 @@ export interface WsHubOptions {
   heartbeatMs?: number;
   /** Upper bound on channels a single socket may subscribe to. */
   maxSubscriptions?: number;
+  /** Hard cap on simultaneous connected clients (0/undefined = unlimited). */
+  maxClients?: number;
 }
 
 const ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
@@ -59,6 +61,7 @@ export class WebSocketHub {
   private readonly maxPayload: number;
   private readonly heartbeatMs: number;
   private readonly maxSubs: number;
+  private readonly maxClients: number;
   private readonly unsubscribeBus: () => void;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private readonly log: Logger;
@@ -74,6 +77,7 @@ export class WebSocketHub {
     this.maxPayload = opts.maxPayloadBytes ?? 64 * 1024;
     this.heartbeatMs = opts.heartbeatMs ?? 30_000;
     this.maxSubs = opts.maxSubscriptions ?? 100;
+    this.maxClients = opts.maxClients ?? 0;
     this.wss = new WebSocketServer({
       port: opts.port,
       host: opts.host,
@@ -127,6 +131,17 @@ export class WebSocketHub {
   /* --------------------------------------------------------------- internals */
 
   private onConnection(socket: WebSocket, remote: string): void {
+    if (this.maxClients > 0 && this.subscriptions.size >= this.maxClients) {
+      // Shed load before registering: beyond the cap we refuse rather than degrade
+      // service for everyone already connected.
+      this.log.warn('ws connection refused (client cap reached)', { remote, cap: this.maxClients });
+      try {
+        socket.close(1013, 'server at connection capacity');
+      } catch {
+        socket.terminate();
+      }
+      return;
+    }
     this.subscriptions.set(socket, new Set());
     this.log.debug('ws client connected', { remote });
 

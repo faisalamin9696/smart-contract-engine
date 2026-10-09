@@ -29,6 +29,10 @@ const CONFIG: Config = {
   sandboxMemoryLimitMb: 128,
   failOnDeepFork: true,
   logLevel: 'info',
+  quorumVerifyDepth: 0, // single mock endpoint — nothing to cross-check
+  rateLimitRpm: 0, // no limiter in api tests (keeps request-heavy suites deterministic)
+  trustProxyHops: 1,
+  wsMaxClients: 100,
 };
 
 /* ------------------------------------------------------------ fixture chain */
