@@ -40,6 +40,9 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
+      # prisma validate resolves env("DATABASE_URL") in the datasource (locally
+      # provided by .env); point it at the throwaway DB — validate never connects.
+      DATABASE_URL: postgresql://sce:sce@localhost:5432/steemcraft_test
       TEST_DATABASE_URL: postgresql://sce:sce@localhost:5432/steemcraft_test
     steps:
       - uses: actions/checkout@v4
