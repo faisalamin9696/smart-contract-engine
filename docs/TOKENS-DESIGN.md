@@ -213,8 +213,18 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
    in both breakdowns, and `computeRoyalty` gained the treasury line;
    `placeOrder` now emits `priceSymbol`; `params`/`balances`/`tokens`/
    `orders(priceSymbol)` probed live against production — all valid)
-7. Tests: unit + determinism; integration parity suite needs
-   `TEST_DATABASE_URL` (CI job planned)
+7. Tests: unit + determinism + CI — **done 2026-10-09**
+   (`.github/workflows/ci.yml`: ubuntu + `postgres:16` service; runs the full
+   gate set — prisma validate, typecheck, `jest --runInBand` **with
+   `TEST_DATABASE_URL`, so the Postgres parity suite finally executes** (it had
+   been skipped everywhere without a DB), build, js-yaml on all compose files,
+   `sh -n docker-entrypoint.sh`. First live parity run caught and fixed two
+   divergences: the integration test asserted the wrong `pruneJournal`
+   direction (the contract is *keep-from-height*, which the indexer's undo
+   buffer relies on), and `putJournal(h, [])` returned `[]` in MemoryStore but
+   a sentinel row in PrismaStateStore — the sentinel constants now live in
+   `state/store.ts`, both backends emit the identical shape, and the journal
+   storage contract has unit coverage. CI green: 16/16 suites, 157/157 tests)
 
 ## Kickoff decisions (confirmed 2026-10-07)
 
@@ -240,12 +250,17 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
 ## Repo state at handoff
 
 - Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
-  (private), main with build-order steps 1–6 + genesis helper + the pre-release
+  (private), main with build-order steps 1–7 + genesis helper + the pre-release
   reset migration `0005_reset_legacy_state` (truncates all state tables and
   re-seeds the all-zero `param` bootstrap; applied in production 2026-10-09;
   guarded by `tests/unit/resetMigration.test.ts`); gates before push:
   `npx tsc --noEmit`, `npx jest --runInBand`, `npm run build`,
   `npx js-yaml <compose>`, `sh -n docker-entrypoint.sh`
+- CI (since 2026-10-09): `.github/workflows/ci.yml` runs on push/PR —
+  postgres:16 service, prisma validate, typecheck, full jest **including the
+  Postgres parity suite** (`TEST_DATABASE_URL`), build, js-yaml, `sh -n`
+  entrypoint; latest run green (16/16 suites, 157/157 tests, 0 skipped).
+  Local Windows run stays at 151 passed / 6 skipped (parity needs a DB)
 - Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green after
   step 6 (rebuilt with `NEXT_PUBLIC_CUSTOM_JSON_ID=sce-mainnet1` inlined);
   new + renamed GraphQL documents probed against live schema 2026-10-09;
@@ -260,4 +275,4 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
 - **Still pending**: first e2e NFT test from the frontend (`create` →
   `/collections`) — now unblocked, everything it needs has shipped
 - Housekeeping: stray `limit` file in `E:\SteemNft` root; frontend git init;
-  DB password rotation (old repo history); CI with postgres service
+  DB password rotation (old repo history)
