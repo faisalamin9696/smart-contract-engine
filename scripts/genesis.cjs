@@ -26,7 +26,9 @@
 
 const { Client, PrivateKey } = require('@steempro/dsteem');
 
-const OP_ID = 'sce-mainnet1';
+// custom_json operation id — override with SCE_OP_ID to run genesis for an
+// isolated network (e.g. SCE_OP_ID=sce-testnet1 broadcasts testnet genesis).
+const OP_ID = process.env.SCE_OP_ID || 'sce-mainnet1';
 const ACCOUNT = process.env.GENESIS_ACCOUNT || 'steempro.com';
 const STEEM_RPC = process.env.STEEM_RPC || 'https://api.steemit.com';
 const ENGINE_API = (process.env.ENGINE_API || 'https://nft-api.steempro.com').replace(/\/+$/, '');

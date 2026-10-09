@@ -31,8 +31,8 @@ function fakeRes(): FakeRes {
   return res as unknown as FakeRes;
 }
 
-function fakeReq(ip: string, path = '/api/v1/collections'): Request {
-  return { ip, path, socket: {} } as unknown as Request;
+function fakeReq(ip: string, path = '/api/v1/collections', method = 'GET'): Request {
+  return { ip, path, method, socket: {} } as unknown as Request;
 }
 
 /** Runs the middleware; resolves true when the request was allowed through. */
@@ -93,6 +93,18 @@ describe('createRateLimiter', () => {
     // the API itself is still limited
     expect(run(mw, fakeReq('9.9.9.9')).allowed).toBe(true);
     expect(run(mw, fakeReq('9.9.9.9')).allowed).toBe(false);
+  });
+
+  it('never rate-limits CORS preflights (OPTIONS) — they must not double cross-origin traffic', () => {
+    let t = 0;
+    const mw = createRateLimiter({ rpm: 1, now: () => t });
+
+    for (let i = 0; i < 50; i++) {
+      expect(run(mw, fakeReq('7.7.7.7', '/api/v1/collections', 'OPTIONS')).allowed).toBe(true);
+    }
+    // GETs from the same IP are still metered
+    expect(run(mw, fakeReq('7.7.7.7')).allowed).toBe(true);
+    expect(run(mw, fakeReq('7.7.7.7')).allowed).toBe(false);
   });
 
   it('isolates buckets per client IP', () => {

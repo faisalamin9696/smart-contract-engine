@@ -1,4 +1,3 @@
-import { Client } from '@steempro/dsteem';
 import type { Logger } from '../logger';
 import { nullLogger } from '../logger';
 import { fingerprint } from '../utils/canonical';
@@ -43,13 +42,78 @@ export class RpcError extends Error {
   }
 }
 
+/** The transport surface FailoverRpc needs — one method, trivially mockable. */
+export interface RpcCaller {
+  call(api: string, method: string, params?: unknown): Promise<unknown>;
+}
+
+/**
+ * Dependency-free JSON-RPC caller speaking the appbase `call` envelope Steem
+ * nodes accept:
+ *
+ *   {"id":"0","jsonrpc":"2.0","method":"call","params":[<api>,<method>,<params>]}
+ *
+ * (Byte-compatible with the transport this replaced — same envelope, same
+ * error propagation — minus the third-party dependency tree.) One attempt per
+ * call: rotation, cooldowns and timeouts are FailoverRpc's job; the AbortController
+ * here just guarantees a hung socket never outlives `timeoutMs`.
+ */
+export function createJsonRpcCaller(url: string, timeoutMs: number): RpcCaller {
+  return {
+    async call(api: string, method: string, params?: unknown): Promise<unknown> {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      timer.unref?.();
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            'user-agent': 'sce-engine/1.0',
+          },
+          body: JSON.stringify({ id: '0', jsonrpc: '2.0', method: 'call', params: [api, method, params ?? []] }),
+          signal: controller.signal,
+        });
+
+        const text = await response.text();
+        let payload: {
+          jsonrpc?: unknown;
+          result?: unknown;
+          error?: { code?: number; message?: string };
+        } | null = null;
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          /* not JSON — handled below */
+        }
+
+        if (payload !== null && payload.jsonrpc === '2.0') {
+          if (payload.error) {
+            // FC-style error: message already carries the node's explanation.
+            throw new RpcError(
+              payload.error.message ?? `rpc error (code ${payload.error.code ?? '?'}) from ${url}`,
+              'RPC_ERROR',
+            );
+          }
+          return payload.result;
+        }
+        if (!response.ok) throw new RpcError(`HTTP ${response.status} from ${url}`, 'HTTP_ERROR');
+        throw new RpcError(`malformed rpc response from ${url} (no jsonrpc envelope)`, 'BAD_RESPONSE');
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 export interface FailoverOptions {
   timeoutMs?: number;
   /** How long a failing endpoint is taken out of rotation. */
   cooldownMs?: number;
   logger?: Logger;
   /** Injected for tests. */
-  clientFactory?: (url: string) => Pick<Client, 'call'>;
+  clientFactory?: (url: string) => RpcCaller;
   /**
    * Blocks within this many heights of the known head are cross-checked against at
    * least one other endpoint before being applied (0 = disabled). Deep-history sync
@@ -84,7 +148,7 @@ export function blockFingerprint(block: RawBlock): string {
 
 interface EndpointState {
   url: string;
-  client: Pick<Client, 'call'>;
+  client: RpcCaller;
   consecutiveFailures: number;
   cooldownUntil: number;
   lastError: string | null;
@@ -119,7 +183,7 @@ export class FailoverRpc implements SteemRpc {
   private readonly timeoutMs: number;
   private readonly cooldownMs: number;
   private readonly log: Logger;
-  private readonly factory: (url: string) => Pick<Client, 'call'>;
+  private readonly factory: (url: string) => RpcCaller;
   private readonly quorumDepth: number;
   private readonly now: () => number;
   /** Most recent head height this client observed (set by getHead — the indexer polls it every cycle). */
@@ -130,7 +194,7 @@ export class FailoverRpc implements SteemRpc {
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.cooldownMs = options.cooldownMs ?? 30_000;
     this.log = options.logger ?? nullLogger;
-    this.factory = options.clientFactory ?? ((url) => new Client(url, { timeout: this.timeoutMs }));
+    this.factory = options.clientFactory ?? ((url) => createJsonRpcCaller(url, this.timeoutMs));
     this.quorumDepth = options.quorumDepth ?? 0;
     this.now = options.now ?? Date.now;
     this.endpoints = endpoints.map((url) => ({

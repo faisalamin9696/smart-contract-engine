@@ -232,6 +232,14 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
   });
 
   it('answers REST reads over indexed projections', async () => {
+    // Public-API surface: any origin may read it, and every response (even
+    // errors) carries the baseline security headers.
+    const bare = await fetch(`${base}/api/v1/collections`);
+    expect(bare.headers.get('access-control-allow-origin')).toBe('*');
+    expect(bare.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(bare.headers.get('x-frame-options')).toBe('DENY');
+    expect(bare.headers.get('x-powered-by')).toBeNull();
+
     const collections = await getJson(`${base}/api/v1/collections`);
     expect(collections.data).toHaveLength(1);
     expect(collections.data[0]).toMatchObject({
@@ -401,6 +409,22 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
       instance: { id: '1', owner: 'carol' },
       status: { storage: 'memory', cursorHeight: 4 },
     });
+  });
+
+  it('rejects an alias bomb before any resolver runs', async () => {
+    // 51 aliased copies of a 100-row list field — above MAX_QUERY_ALIASES (50).
+    const fields = Array.from({ length: 51 }, (_, i) => `q${i}: collections { symbol }`);
+    const response = await fetch(`${base}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: `{ ${fields.join(' ')} }` }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { errors?: { message?: string }[] };
+    // Apollo stamps validation-phase errors `GRAPHQL_VALIDATION_FAILED`; the
+    // tell-tale is our analyzer's message (no resolver ran, no data key).
+    expect(body.errors?.[0]?.message).toContain('query rejected:');
+    expect((body as { data?: unknown }).data).toBeUndefined();
   });
 
   it('answers fungible token queries over GraphQL', async () => {

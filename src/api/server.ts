@@ -1,5 +1,6 @@
 import http from 'node:http';
 
+import compression from 'compression';
 import cors from 'cors';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 
@@ -72,6 +73,25 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
   // prepending its own X-Forwarded-For values; a hop count cannot be spoofed.
   app.set('trust proxy', config.trustProxyHops);
 
+  // Baseline security headers on every response (including errors) — this is a
+  // JSON API, so: no MIME sniffing, no framing of our responses, no referrer leak.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
+
+  // The API is a public, read-only surface that accepts no credentials: allow any
+  // origin once, globally (REST included — browser clients third parties build on
+  // this API need it; credentialed requests stay impossible because we never set
+  // `credentials` and never read cookies/authorization).
+  app.use(cors());
+
+  // JSON responses compress ~5-10× — the single biggest lever for serving traffic
+  // (default 1kB threshold skips tiny payloads; WebSockets are a separate server).
+  app.use(compression());
+
   // Per-IP request budget over REST + GraphQL + discovery (/health is exempt).
   app.use(createRateLimiter({ rpm: config.rateLimitRpm }));
 
@@ -117,7 +137,6 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
     graphql = await createGraphQL({ store, indexer, storage: deps.storage, logger });
     app.use(
       config.graphqlPath,
-      cors(),
       express.json({ limit: '256kb' }),
       graphql.handler,
     );
@@ -132,6 +151,11 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
   app.use(restErrorHandler(logger));
 
   const server = http.createServer(app);
+  // Slowloris/backpressure hygiene: every payload here is small JSON — a request
+  // that has not completed within a minute is broken or hostile, and must not
+  // hold a socket. (WebSockets live on a separate server with ping/pong heartbeat.)
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 60_000;
   const httpPort = config.restEnabled || config.graphqlEnabled ? await listen(server, config.port) : null;
   if (httpPort !== null) log.info('http server listening', { port: httpPort, graphql: config.graphqlEnabled, rest: config.restEnabled });
 

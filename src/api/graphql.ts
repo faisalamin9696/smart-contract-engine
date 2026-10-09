@@ -1,5 +1,5 @@
 import { ApolloServer, HeaderMap, type HTTPGraphQLRequest } from '@apollo/server';
-import { GraphQLError, GraphQLScalarType, Kind, type ValueNode } from 'graphql';
+import { GraphQLError, GraphQLScalarType, Kind, type DocumentNode, type FragmentDefinitionNode, type SelectionNode, type ValidationContext, type ValueNode } from 'graphql';
 import type { NextFunction, Request, Response } from 'express';
 
 import {
@@ -17,6 +17,100 @@ import type { Logger } from '../logger';
 /** Pagination ceiling — deep offsets are a DoS vector on a public endpoint. */
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
+
+/* ------------------------------------------------------- query cost ceilings */
+/**
+ * Per-request query-cost caps (SECURITY.md → "Query complexity"). GraphQL
+ * validation already bounds *depth* to the schema's shape; the caps that earn
+ * their keep here are **alias breadth** (N copies of a list field = N×100 rows
+ * read) and directive counts. Depth is kept as defence-in-depth for future
+ * schema growth and fragment tricks. Pure constants — tuning them is a code
+ * change, not an env knob, so behaviour is identical on every node.
+ */
+export const MAX_QUERY_DEPTH = 15;
+export const MAX_QUERY_ALIASES = 50;
+export const MAX_QUERY_DIRECTIVES = 100;
+
+export interface QueryCost {
+  /** Deepest field nesting reached (fragment spreads resolved, cycles guarded). */
+  depth: number;
+  /** Aliased fields — the breadth multiplier stacked on top of list sizes. */
+  aliases: number;
+  /** Total @include/@skip directives (parse/validate CPU). */
+  directives: number;
+}
+
+/**
+ * Measures what a parsed operation actually costs us. Fragment definitions are
+ * followed — an attacker would otherwise hide breadth inside fragments — with a
+ * per-path cycle guard so self-referential fragments terminate (and are rejected
+ * by validation anyway).
+ */
+export function analyzeQuery(document: DocumentNode): QueryCost {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) fragments.set(definition.name.value, definition);
+  }
+  let depth = 0;
+  let aliases = 0;
+  let directives = 0;
+
+  const walk = (selections: readonly SelectionNode[], current: number, spreads: ReadonlySet<string>): void => {
+    for (const selection of selections) {
+      if (selection.kind === Kind.FIELD) {
+        if (selection.alias) aliases += 1;
+        directives += selection.directives?.length ?? 0;
+        const next = current + 1;
+        if (next > depth) depth = next;
+        if (selection.selectionSet) walk(selection.selectionSet.selections, next, spreads);
+      } else if (selection.kind === Kind.INLINE_FRAGMENT) {
+        directives += selection.directives?.length ?? 0;
+        walk(selection.selectionSet.selections, current, spreads);
+      } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
+        directives += selection.directives?.length ?? 0;
+        if (spreads.has(selection.name.value)) continue; // cycle guard
+        const fragment = fragments.get(selection.name.value);
+        if (!fragment) continue; // unresolved — validation rejects it anyway
+        const next = new Set(spreads).add(selection.name.value);
+        walk(fragment.selectionSet.selections, current, next);
+      }
+    }
+  };
+
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.OPERATION_DEFINITION) walk(definition.selectionSet.selections, 0, new Set());
+  }
+  return { depth, aliases, directives };
+}
+
+/**
+ * Validation rule enforcing {@link analyzeQuery}'s ceilings. Reporting through
+ * `context.reportError` (instead of throwing mid-pipeline) makes graphql-js
+ * fail validation normally: the request is answered **400** with the error's
+ * `BAD_USER_INPUT` code and *no resolver ever runs*.
+ */
+export function queryCostRule(context: ValidationContext) {
+  let checked = false;
+  return {
+    OperationDefinition(): void {
+      if (checked) return; // analyzeQuery measures the whole document at once
+      checked = true;
+      const cost = analyzeQuery(context.getDocument());
+      if (
+        cost.depth > MAX_QUERY_DEPTH ||
+        cost.aliases > MAX_QUERY_ALIASES ||
+        cost.directives > MAX_QUERY_DIRECTIVES
+      ) {
+        context.reportError(
+          new GraphQLError(
+            `query rejected: depth ${cost.depth}/${MAX_QUERY_DEPTH}, aliases ${cost.aliases}/${MAX_QUERY_ALIASES}, directives ${cost.directives}/${MAX_QUERY_DIRECTIVES}`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          ),
+        );
+      }
+    },
+  };
+}
 
 export interface GraphQLContext {
   store: EngineStore;
@@ -541,6 +635,7 @@ export async function createGraphQL(deps: GraphQLDeps): Promise<GraphQLHandle> {
     resolvers: buildResolvers(),
     introspection: true,
     includeStacktraceInErrorResponses: false,
+    validationRules: [queryCostRule],
     plugins: [
       {
         async requestDidStart() {

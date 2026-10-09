@@ -78,3 +78,9 @@ jobs:
 
       - name: Entrypoint shell syntax
         run: sh -n docker-entrypoint.sh
+
+      # Advisory visibility for the *production* dependency tree. Known,
+      # documented advisories (docs/SECURITY.md → "Known dependency advisories")
+      # sit below `critical`, so only a new critical advisory fails the build.
+      - name: Dependency audit (production, fails on critical)
+        run: npm audit --omit=dev --audit-level=critical

@@ -55,7 +55,10 @@ export function createRateLimiter(options: RateLimiterOptions) {
   }
 
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (req.path === '/health') return next();
+    // /health: orchestrators poll it on their own cadence. OPTIONS: CORS
+    // preflights are cheap static replies — metering them would double the cost
+    // of every cross-origin client burst without protecting anything.
+    if (req.path === '/health' || req.method === 'OPTIONS') return next();
     const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
     const timestamp = now();
 
