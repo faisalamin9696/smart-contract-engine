@@ -184,7 +184,23 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
    subscribers without touching guest code)
 6. Frontend (`E:\SteemNft`): builder.ts new actions + AUTH rows, wallet
    balance in topbar, fee line + pre-Keychain balance check in fee dialogs,
-   GraphQL queries/types
+   GraphQL queries/types — **done 2026-10-09**
+   (contract-aware envelope — `{ contract, action, params }` for `tokens`/
+   `engine`, bare `{ action, params }` kept for nft so payloads stay
+   byte-identical; `TOKEN_AUTH`/`ENGINE_AUTH` rows + `buildTokenCreate`/
+   `Issue`/`Transfer`/`Burn`/`buildSetParam` wrappers over
+   `buildFromParams(contract, …)`; topbar chip shows the `feeTokens[0]`
+   balance from the same cached `balances` query the dialogs gate on; the
+   drawer prints `nftCreationFee` / `addPropertyFee` (4th+ property) /
+   `issueFee` above the sign button and the buy dialog gates
+   `balance >= price` in `priceSymbol` — an *unknown* balance never blocks,
+   only a confidently-low one; GraphQL gains `tokens`/`token`/`balances`/
+   `params` documents + `Token`/`Balance`/`EngineParams`/`FeeSchedule`
+   types, the step-4 `currency` → `priceSymbol` rename is fixed across
+   queries/UI/fixtures, `Settlement.fee` + the `fillOrderFeeBps` cut surface
+   in both breakdowns, and `computeRoyalty` gained the treasury line;
+   `placeOrder` now emits `priceSymbol`; `params`/`balances`/`tokens`/
+   `orders(priceSymbol)` probed live against production — all valid)
 7. Tests: unit + determinism; integration parity suite needs
    `TEST_DATABASE_URL` (CI job planned)
 
@@ -212,14 +228,16 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
 ## Repo state at handoff
 
 - Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
-  (private), main with build-order steps 1–4 + genesis helper; gates before push:
+  (private), main with build-order steps 1–6 + genesis helper; gates before push:
   `npx tsc --noEmit`, `npx jest --runInBand`, `npm run build`,
   `npx js-yaml <compose>`, `sh -n docker-entrypoint.sh`
-- Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green;
-  all 11 GraphQL documents verified against live schema; live endpoints:
-  API `https://nft-api.steempro.com`, WS `wss://nft-ws.steempro.com`
-  (also `nss-ws`), engine healthy (cursor == head, postgres, isolated-vm)
+- Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green after
+  step 6 (rebuilt with `NEXT_PUBLIC_CUSTOM_JSON_ID=sce-mainnet1` inlined);
+  new + renamed GraphQL documents probed against live schema 2026-10-09;
+  live endpoints: API `https://nft-api.steempro.com`,
+  WS `wss://nft-ws.steempro.com` (also `nss-ws`), engine healthy
+  (cursor == head, postgres, isolated-vm)
 - **Still pending**: first e2e NFT test from the frontend (`create` →
-  `/collections`) — run before or alongside this work
+  `/collections`) — now unblocked, everything it needs has shipped
 - Housekeeping: stray `limit` file in `E:\SteemNft` root; frontend git init;
   DB password rotation (old repo history); CI with postgres service
