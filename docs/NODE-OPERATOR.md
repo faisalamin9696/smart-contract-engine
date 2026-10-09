@@ -84,7 +84,52 @@ Full list: README → Configuration; every knob is also in `.env.example`.
 * Cursor vs head: watch `GET /health` (`cursorHeight` catching up to `headHeight`).
   During catch-up the engine polls as fast as RPC allows; at head it settles to ~3s.
 
-## 5. Verify your node (the important part)
+## 5. Start from a shared snapshot (fast start, optional)
+
+Instead of replaying chain history (§4), you can restore a `pg_dump` of an
+already-synced node and continue from its cursor — a quick way to stand up a
+second node, and the supported way to distribute the ledger as history grows.
+
+**Publisher** (someone with DB access; on this deployment Postgres runs as an
+internal container — see DOKPLOY.md for its name):
+
+```bash
+# find the container:  docker ps --format '{{.Names}}' | grep -i postg
+docker exec <postgres-container> pg_dump -U <user> -d <db> -Fc > sce-snapshot.dump
+sha256sum sce-snapshot.dump      # publish this digest next to the file
+```
+
+* one `pg_dump` is a single MVCC snapshot — state and cursor are mutually
+  consistent (the cursor height is the height of every row in the file);
+* it contains only public, chain-derived data: roles and passwords are **not**
+  included (no `--globals`), so the file is safe to share;
+* ship the file's sha256 and the cursor height (`GET /api/v1/status` at dump
+  time) together with it — and keep one copy off-box; the same command doubles
+  as your disaster-recovery backup.
+
+**Receiver:**
+
+```bash
+sha256sum sce-snapshot.dump                 # must equal the published digest
+pg_restore --clean --if-exists --no-owner -d "$DATABASE_URL" sce-snapshot.dump
+# plain-SQL dump instead: psql "$DATABASE_URL" -f sce-snapshot.sql
+
+# start the engine with START_BLOCK_HEIGHT **unset** — it resumes at the
+# dump's cursor automatically; the dump carries _prisma_migrations, so
+# `prisma migrate deploy` is a no-op until the next release ships one.
+```
+
+**Verification matters more with snapshots.** A restored dump is a *trust
+transfer* until you prove it: run §6 against a reference node once both are at
+the same height. If you want zero trust from the start, use the replay path in
+§4 instead — it just costs more time as history grows.
+
+Not recommended: **live logical replication** of the publisher's Postgres. It
+requires exposing the database beyond the internal network, and your engine
+writes to the same rows, which breaks the replication stream. Snapshots are the
+distribution mechanism this project supports.
+
+## 6. Verify your node (the important part)
 
 ```bash
 # 1) alive and progressing
@@ -123,7 +168,7 @@ Near the head, blocks are additionally **quorum-verified** across your endpoints
 (see SECURITY.md → "RPC trust"), so a single lying RPC cannot silently diverge your
 view while you watch.
 
-## 6. Upgrades
+## 7. Upgrades
 
 ```bash
 git pull
@@ -135,7 +180,7 @@ Migrations are additive and run automatically; no manual DDL. If a migration is 
 reset-style operation (like `0005_reset_legacy_state`), it will be announced in the
 release notes — read them before deploying.
 
-## 7. Serving others / contributing
+## 8. Serving others / contributing
 
 * Put the engine behind your reverse proxy if you expose it publicly (Traefik/Caddy
   with rate limits at the edge complement the built-in limiter), keep Postgres on an
