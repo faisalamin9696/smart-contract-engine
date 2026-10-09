@@ -1,5 +1,8 @@
 # SCE — Smart Contract Engine
 
+[![CI](https://github.com/faisalamin9696/smart-contract-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/faisalamin9696/smart-contract-engine/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A production-oriented Node.js/TypeScript service that indexes Steem `custom_json`
 operations (`id = sce-mainnet1`), executes them inside a sandboxed deterministic VM, keeps
 an off-chain state database, and exposes that state through REST, GraphQL and WebSocket.
@@ -28,8 +31,10 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 
 **Guides:** [Run your own node](docs/NODE-OPERATOR.md) ·
 [Security & threat model](docs/SECURITY.md) ·
+[Testnet](docs/TESTNET.md) ·
 [Deployment](docs/DEPLOYMENT.md) · [Dokploy](docs/DOKPLOY.md) ·
-[Tokens design](docs/TOKENS-DESIGN.md) · [License](LICENSE) (MIT)
+[Tokens design](docs/TOKENS-DESIGN.md) · [Contributing](CONTRIBUTING.md) ·
+[License](LICENSE) (MIT)
 
 ## What it does
 

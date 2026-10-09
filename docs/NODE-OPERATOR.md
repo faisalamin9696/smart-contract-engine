@@ -5,9 +5,9 @@ state** — the engine is a deterministic function of the chain, and the API let
 prove your result matches everyone else's. This guide takes you from zero to a
 verified node.
 
-Related: [SECURITY.md](SECURITY.md) (threat model), [DEPLOYMENT.md](DEPLOYMENT.md)
-(server details), [DOKPLOY.md](DOKPLOY.md) (PaaS deploy), [README](../README.md)
-(architecture).
+Related: [SECURITY.md](SECURITY.md) (threat model), [TESTNET.md](TESTNET.md)
+(run an isolated testnet), [DEPLOYMENT.md](DEPLOYMENT.md) (server details),
+[DOKPLOY.md](DOKPLOY.md) (PaaS deploy), [README](../README.md) (architecture).
 
 ## What you get
 
@@ -50,8 +50,8 @@ Docker users: see the compose variants in the README (the image entrypoint runs
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `STEEM_RPC_ENDPOINTS` | three public endpoints | comma-separated. **Use ≥ 2, ideally 3, independent endpoints** — that is what powers quorum verification. Best: your own full node (`http://<your-node>:8090`) plus two public ones. |
-| `DATABASE_URL` | — | your PostgreSQL. `STORAGE=postgres` refuses to start without it (no silent in-memory mode). |
-| `SCE_OP_ID` | `sce-mainnet1` | mainnet operation id. Different id ⇒ an isolated network of your own (testnet-style). |
+| `DATABASE_URL` | — | your PostgreSQL. `STORAGE=postgres` refuses to start without it (no silent in-memory mode). Append `?connection_limit=N` to size the Prisma pool (default ≈ CPU cores×2+1) under heavy API traffic. |
+| `SCE_OP_ID` | `sce-mainnet1` | mainnet operation id. Different id ⇒ an isolated network of your own (testnet-style — see [TESTNET.md](TESTNET.md)). |
 | `START_BLOCK_HEIGHT` | *(unset ⇒ current head)* | where a fresh DB starts indexing — see §4. |
 | `QUORUM_VERIFY_DEPTH` | `50` | head-window size for cross-endpoint block verification (0 = off). |
 | `RATE_LIMIT_RPM` | `600` | per-IP HTTP budget (`/health` exempt; 0 = off). |
@@ -168,7 +168,43 @@ Near the head, blocks are additionally **quorum-verified** across your endpoints
 (see SECURITY.md → "RPC trust"), so a single lying RPC cannot silently diverge your
 view while you watch.
 
-## 7. Upgrades
+## 7. Monitoring & capacity
+
+No agent needed — the engine answers its own health over HTTP. **Alert on these**
+(a 60-second cron against the endpoints below is enough):
+
+| Signal | Where | Alert when |
+| --- | --- | --- |
+| cursor lag | `GET /health` | `headHeight - cursorHeight > 100` for several minutes (stuck ingestion) |
+| ingest progress | `GET /api/v1/status` | `blocksApplied` flat while the cursor lags |
+| quorum disagreements | logs (`QUORUM_DISAGREE`) | any sustained occurrence — a lying or failing endpoint |
+| sandbox degradation | `GET /health` → `sandbox` | anything but `isolated-vm` in production |
+| RPC endpoint health | logs (cooldown notices) | every endpoint in cooldown |
+| disk | host | > 80 % used (Postgres data + WAL grow with history) |
+| rate limiting | logs / edge metrics | rising 429s — legitimate clients being cut |
+| process | host | RSS growth without bound, restart loops |
+
+```bash
+# cursor-lag probe: exits 1 when > 100 blocks behind or the API is down
+h=$(curl -sf localhost:4000/health) || exit 1
+node -e 'const h=JSON.parse(process.argv[1]);process.exit(h.headHeight-h.cursorHeight>100?1:0)' "$h"
+```
+
+**Capacity baseline** (head-following node, honest numbers):
+
+| Resource | Small node | Notes |
+| --- | --- | --- |
+| CPU | 1–2 vCPU | isolated-vm execution + JSON parsing; catch-up replay is CPU/RPC bound |
+| RAM | 1–2 GB | Node process ~200–400 MB + Postgres shared buffers ~512 MB |
+| Disk | ~1–2 GB / year | one small row per block (journal is pruned, block/op history is kept) + WAL; snapshots (§5) compress well |
+| Network | ~1 request / 3 s at head | burst during catch-up; responses are gzip-compressed |
+| DB pool | ≈ CPU cores × 2 + 1 | raise deliberately via `?connection_limit=` when API traffic grows |
+
+Reads scale horizontally: the API is read-only, so read replicas behind a
+replicated database can absorb traffic. The write path (ingestion) is
+**single-writer by design** — never run two engines against one database.
+
+## 8. Upgrades
 
 ```bash
 git pull
@@ -180,24 +216,45 @@ Migrations are additive and run automatically; no manual DDL. If a migration is 
 reset-style operation (like `0005_reset_legacy_state`), it will be announced in the
 release notes — read them before deploying.
 
-## 8. Serving others / contributing
+## 9. Serving others / contributing
 
-* Put the engine behind your reverse proxy if you expose it publicly (Traefik/Caddy
-  with rate limits at the edge complement the built-in limiter), keep Postgres on an
-  internal network only, and pin `SANDBOX_PROVIDER=isolated-vm`.
-* Applications pick your endpoint by URL — there is no registration with a central
-  operator; agreement is enforced by the state checksum, not by an authority.
-* To contribute code: open an issue first for large changes, then a PR. Gates every
-  PR must pass (CI runs them on ubuntu + Postgres 16):
+**Reverse proxy** — TLS, edge rate limits (they complement the built-in limiter)
+and WebSocket pass-through. Caddy example:
 
-  ```bash
-  npx tsc --noEmit
-  npx jest --runInBand
-  npm run build
-  npx js-yaml docker-compose.yml   # + the other compose files you touched
-  ```
+```caddyfile
+# API (REST + GraphQL + health)
+your-api.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:4000
+}
 
-  CI config: `.github/workflows/ci.yml`. License: MIT (see `LICENSE`).
+# WebSocket — flush immediately so server-sent frames are never buffered
+your-ws.example.com {
+	reverse_proxy 127.0.0.1:4001 {
+		flush_interval -1
+	}
+}
+```
+
+**Security checklist** (rationale in [SECURITY.md](SECURITY.md)):
+
+* `TRUST_PROXY_HOPS` matches your proxy count **exactly** (never “trust all” — it
+  lets clients spoof their IP past the limiter);
+* `SANDBOX_PROVIDER=isolated-vm` pinned in production;
+* ≥ 2 independent `STEEM_RPC_ENDPOINTS` — quorum verification needs disagreement
+  to be detectable;
+* Postgres reachable only from the engine’s network, strong password, rotated if
+  it ever touched git history;
+* TLS everywhere; your official hostname documented so clients can pin it;
+* `npm audit --omit=dev` reviewed before releases (known advisories are explained
+  in SECURITY.md → “Known dependency advisories”).
+
+Applications pick your endpoint by URL — there is no registration with a central
+operator; agreement is enforced by the state checksum, not by an authority.
+
+**Contributing code:** see [CONTRIBUTING.md](../CONTRIBUTING.md) — open an issue
+first for large changes, then a PR; CI runs every gate on ubuntu + Postgres 16.
+License: MIT (see `LICENSE`).
 
 ## Troubleshooting
 
@@ -208,3 +265,6 @@ release notes — read them before deploying.
 | 429 responses | you or your clients exceeded `RATE_LIMIT_RPM` — raise it or put a proxy budget in front |
 | `sandbox: node-vm` in `/health` | isolated-vm failed to load (toolchain); install build deps or pin providers explicitly |
 | checksum mismatch | compare `entities` digests first; confirm both nodes are at the same `height` |
+| disk filling up | block/op history grows monotonically — watch the trend, keep WAL on the same disk sizing as data, use §5 snapshots for distribution |
+| `sorry, too many clients already` | Postgres connection slots exhausted — lower `connection_limit` in `DATABASE_URL` or raise `max_connections` |
+| upstream HTTP 429 from RPC endpoints | you are polling faster than public endpoints allow — endpoints cool down and rotate automatically; add your own node or raise `BLOCK_POLL_INTERVAL_MS` |

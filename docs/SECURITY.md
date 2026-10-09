@@ -96,8 +96,18 @@ An indexer must not accept a block from a single possibly-lying RPC endpoint:
 * Query/page limits are capped (100 rows), request bodies are capped (256 kB), WS has
   payload caps, a per-socket subscription cap (100), a global client cap
   (`WS_MAX_CLIENTS`) and heartbeat reaping.
-* CORS is open (`cors()`) — acceptable because the API is read-only, cookie-less and
-  meant to be consumed by browsers; there is no credentialed request to protect.
+* **GraphQL query-cost ceilings** run as a validation rule *before any resolver*:
+  depth ≤ 15, aliased fields ≤ 50, directives ≤ 100 (`analyzeQuery`, unit-tested).
+  Alias breadth is the vector that matters — each alias can carry a 100-row list;
+  a bomb is rejected with `400` and zero store access.
+* Every response carries baseline security headers (`X-Content-Type-Options:
+  nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`); HTTP gets
+  header/body timeouts (15 s / 60 s) against slowloris-style socket holds; JSON
+  is gzip-compressed (`compression`) so saturated links keep serving.
+* CORS is open (`cors()` — globally, REST included) — acceptable because the API
+  is read-only, cookie-less and meant to be consumed by browsers; there is no
+  credentialed request to protect. CORS preflights (`OPTIONS`) bypass the limiter:
+  they are static replies, and metering them would only double cross-origin traffic.
 
 ### 7. Secrets
 
@@ -141,8 +151,51 @@ construction; the engine makes that checkable:
 5. **Operational:** rotate the database password (old history), keep Postgres off
    public ports, and keep endpoints HTTPS.
 
+## Hostile node operators (running a node is permissionless — by design)
+
+Anyone may run an engine against Steem; nothing in the protocol lets that harm
+this node, its clients, or the ledger:
+
+* **A node is a reader, not a member.** There is no registry and no join —
+  your production node does not know others exist. Their resource use, bugs or
+  malice never touch your process, database or users.
+* **A hostile operator cannot mint, move or alter anything.** State transitions
+  come only from signed chain operations, every API surface is read-only, and
+  their own node recomputes state from the same chain. Their sole capacity is
+  lying about *reads* to *their own* clients.
+* **Lies are detectable by anyone.** A tampered ledger diverges from an honest
+  one; `state-checksum` at equal heights exposes it immediately — agreement is
+  proven by hash, not by authority.
+* **Impersonation is the real residual risk** — an attacker publishing
+  `evil-api.example.com` and calling it official. Mitigation: official endpoints
+  are the ones in our documentation, and any client can verify ours by checksum.
+* **License note:** MIT lets anyone run, modify and re-brand this code; the lever
+  for restricting that is the license, not the network. Code *contributions*
+  still require PR review + green CI, and repository access can be controlled.
+
+What actually needs guarding (and is): the `steempro.com` signing keys (the only
+path to fee/param changes), the database credential (write capability),
+SSH/Dokploy access, and the official domain.
+
+## Known dependency advisories (audited, explained, tracked)
+
+`npm audit` runs before releases; CI gates at `--audit-level=critical`. The
+residual advisories are all off the runtime API path:
+
+| Advisory | Severity | Why it is acceptable here |
+| --- | --- | --- |
+| `deepmerge-ts` via prisma CLI (`@prisma/config`) | high | CLI config-file merging over **our own** trusted config — never reachable from API input; no stable upstream fix yet; the runtime query client does not use it |
+| `elliptic` / `secp256k1` via `@steempro/dsteem` | low | **devDependencies only** — one-off `scripts/genesis.cjs` broadcasts; the production image omits it entirely (runtime transport is first-party fetch, `src/chain/rpc.ts`) |
+| jest coverage chain (`js-yaml`, `sprintf-js`, `babel-plugin-istanbul`, `braces`) | moderate | test-time tooling only — no shipped or reachable runtime code path |
+
+Local check: `npm audit --omit=dev` (production-only view).
+
 ## Reporting
 
-Open a GitHub issue with reproduction detail, or contact the maintainer privately for
-anything exploitable in production. Fixes land through the normal gate: typecheck,
-full test suite, build, compose validation, green CI.
+Found something exploitable? **Do not open a public issue first.**
+
+1. Use GitHub private vulnerability reporting (Security → Report a
+   vulnerability), or contact the maintainer privately with reproduction detail.
+2. Expect acknowledgment, then a fix landing through the normal gate: typecheck,
+   full test suite, build, compose validation, green CI.
+3. Non-exploitable bugs and hardening ideas are welcome as normal issues.
