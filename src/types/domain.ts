@@ -230,6 +230,8 @@ export type OrderStatus = 'OPEN' | 'FILLED' | 'CANCELLED';
 export type Settlement = {
   price: string;
   royalty: string;
+  /** Platform cut (`param.fees.fillOrderFeeBps` of the price) credited to the treasury. */
+  fee?: string;
   sellerProceeds: string;
   royaltyRecipient: string;
   buyer: string;
@@ -241,9 +243,9 @@ export type MarketOrder = {
   symbol: string;
   instanceId: string;
   seller: string;
-  /** Decimal string in STEEM (3 dp). */
+  /** Decimal string in `priceSymbol` (precision-capped at placement). */
   price: string;
-  currency: 'STEEM';
+  priceSymbol: string;
   status: OrderStatus;
   /** Snapshot taken at placement so later collection edits cannot alter open orders. */
   royaltyBps: string;
@@ -331,7 +333,9 @@ export interface EngineEvent {
   instanceId?: string;
   orderId?: string;
   price?: string;
+  priceSymbol?: string;
   royalty?: string;
+  fee?: string;
   sellerProceeds?: string;
   data?: JsonMap;
 }
@@ -477,9 +481,10 @@ export const AccountSchema: z.ZodType<Account> = z
 
 export const SettlementSchema: z.ZodType<Settlement> = z
   .object({
-    price: z.string().regex(AMOUNT),
-    royalty: z.string().regex(AMOUNT),
-    sellerProceeds: z.string().regex(AMOUNT),
+    price: z.string().regex(DECIMAL),
+    royalty: z.string().regex(DECIMAL),
+    fee: z.string().regex(DECIMAL).optional(),
+    sellerProceeds: z.string().regex(DECIMAL),
     royaltyRecipient: z.string().regex(ACCOUNT),
     buyer: z.string().regex(ACCOUNT),
     seller: z.string().regex(ACCOUNT),
@@ -492,8 +497,8 @@ export const MarketOrderSchema: z.ZodType<MarketOrder> = z
     symbol: z.string().regex(SYMBOL),
     instanceId: z.string().regex(INSTANCE_KEY),
     seller: z.string().regex(ACCOUNT),
-    price: z.string().regex(AMOUNT),
-    currency: z.literal('STEEM'),
+    price: z.string().regex(DECIMAL),
+    priceSymbol: z.string().regex(SYMBOL),
     status: z.enum(['OPEN', 'FILLED', 'CANCELLED']),
     royaltyBps: z.string().regex(UINT),
     royaltyRecipient: z.string().regex(ACCOUNT),

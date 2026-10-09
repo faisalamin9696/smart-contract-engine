@@ -69,6 +69,21 @@ async function runScenario(provider: SandboxOptions['provider']): Promise<Scenar
     ...header,
     height: 6,
   });
+  // step 4 settlement: the buyer pays in SCE, so the price token must exist first
+  await engine.execOk(
+    'create',
+    { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3 },
+    active('alice'),
+    { ...header, height: 7 },
+    'tokens',
+  );
+  await engine.execOk(
+    'issue',
+    { symbol: 'SCE', to: 'erin', quantity: '100' },
+    active('alice'),
+    { ...header, height: 7 },
+    'tokens',
+  );
   await engine.execOk('placeOrder', { symbol: 'QUEST', id: '3', price: '9.999' }, active('carol'), {
     ...header,
     height: 7,

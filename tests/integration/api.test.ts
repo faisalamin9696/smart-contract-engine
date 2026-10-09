@@ -51,6 +51,15 @@ const transferTx = customJsonTx(
   { action: 'transfer', params: { to: 'carol', nfts: [{ symbol: 'RAID', ids: ['1'] }] } },
   active('bob'),
 );
+// step 4: placeOrder settles in a token, so the price token must exist first
+const sceTx = customJsonTx(
+  {
+    contract: 'tokens',
+    action: 'create',
+    params: { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3 },
+  },
+  active('alice'),
+);
 const listTx = customJsonTx(
   { action: 'placeOrder', params: { symbol: 'RAID', id: '1', price: '12.345' } },
   active('carol'),
@@ -144,7 +153,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     rpc.mine({ transactions: [createTx] });
     rpc.mine({ transactions: [mintBobTx] });
     rpc.mine({ transactions: [transferTx] });
-    rpc.mine({ transactions: [listTx] });
+    rpc.mine({ transactions: [sceTx, listTx] });
 
     store = new MemoryStore();
     sandbox = await createSandbox({ provider: 'node-vm', timeoutMs: 1000, memoryLimitMb: 128 });
@@ -249,7 +258,8 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     });
 
     const logs = await getJson(`${base}/api/v1/logs?actor=alice`);
-    expect(logs.data).toHaveLength(1);
+    // alice created the RAID collection and the SCE price token
+    expect(logs.data).toHaveLength(2);
     expect(logs.data[0]).toMatchObject({ action: 'create', status: 'APPLIED' });
 
     const block = await getJson(`${base}/api/v1/blocks/2`);

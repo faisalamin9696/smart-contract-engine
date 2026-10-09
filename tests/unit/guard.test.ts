@@ -60,7 +60,7 @@ const ORDER: MarketOrder = {
   instanceId: 'HERO:1',
   seller: 'alice',
   price: '1.000',
-  currency: 'STEEM',
+  priceSymbol: 'SCE',
   status: 'OPEN',
   royaltyBps: '500',
   royaltyRecipient: 'alice',

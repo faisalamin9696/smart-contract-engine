@@ -138,6 +138,8 @@ export async function buildSnapshot(
         const id = str(params.id);
         if (symbol && id) need.instance.add(instanceKey(symbol, id));
         need.meta.add('order_seq');
+        // the price token definition (precision check runs in the VM); default SCE
+        need.token.add(str(params.priceSymbol) ?? 'SCE');
         break;
       }
       case 'fillOrder':
@@ -216,10 +218,31 @@ export async function buildSnapshot(
   for (const orderId of [...need.order]) {
     const raw = await store.get('order', orderId);
     if (raw && typeof raw === 'object') {
-      const order = raw as { instanceId?: unknown; symbol?: unknown; seller?: unknown };
+      const order = raw as {
+        instanceId?: unknown;
+        symbol?: unknown;
+        seller?: unknown;
+        royaltyRecipient?: unknown;
+        priceSymbol?: unknown;
+      };
       if (typeof order.instanceId === 'string') need.instance.add(order.instanceId);
       if (typeof order.symbol === 'string') need.collection.add(order.symbol);
       if (typeof order.seller === 'string') need.account.add(order.seller);
+      if (action === 'fillOrder') {
+        // Settlement (step 4): the price token moves buyer (an active signer) → seller
+        // + royalty recipient + `fillOrderFeeBps` treasury cut — all rows in
+        // `order.priceSymbol`, with the cut read from the `param` row in-VM.
+        const priceSymbol = typeof order.priceSymbol === 'string' ? order.priceSymbol : 'SCE';
+        need.token.add(priceSymbol);
+        need.param.add(PARAM_KEY);
+        const holders = new Set<string>();
+        if (typeof order.seller === 'string') holders.add(order.seller);
+        if (typeof order.royaltyRecipient === 'string') holders.add(order.royaltyRecipient);
+        for (const signer of auth.active) holders.add(signer);
+        const paramRow = (await store.get('param', PARAM_KEY)) as Param | null;
+        if (paramRow !== null) holders.add(paramRow.treasury);
+        for (const holder of holders) need.balance.add(balanceKey(holder, priceSymbol));
+      }
     }
   }
   // Instance -> collection edges (issue checks supply, placeOrder snapshots royalties).

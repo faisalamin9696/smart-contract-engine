@@ -29,6 +29,21 @@ describe('marketplace order book', () => {
     );
     // second instance used for negative-path listing tests (never listed)
     await engine.execOk('issue', { symbol: 'DRAGON', to: 'seller' }, active('creator'), { height: 101 });
+    // step 4 settlement: orders settle in an engine token — the buyer pays SCE
+    await engine.execOk(
+      'create',
+      { symbol: 'SCE', name: 'Smart Contract Engine', precision: 3 },
+      active('creator'),
+      { height: 99 },
+      'tokens',
+    );
+    await engine.execOk(
+      'issue',
+      { symbol: 'SCE', to: 'buyer', quantity: '100' },
+      active('creator'),
+      { height: 99 },
+      'tokens',
+    );
   });
 
   afterAll(async () => {
@@ -73,6 +88,8 @@ describe('marketplace order book', () => {
       // wiki-style reference: numeric id scoped to the symbol
       instanceId: 'DRAGON:1',
       price: '12.345',
+      // priceSymbol defaults to the genesis fee token
+      priceSymbol: 'SCE',
       status: 'OPEN',
       royaltyBps: '750',
       royaltyRecipient: 'creator',
@@ -134,7 +151,7 @@ describe('marketplace order book', () => {
     expect(await engine.order('ORD-00000002')).toMatchObject({ status: 'OPEN' });
   });
 
-  it('fills an order, transfers the instance and settles royalty to the creator', async () => {
+  it('fills an order, transfers the instance and settles balances atomically', async () => {
     const selfFill = await engine.execFail('fillOrder', { orderId: 'ORD-00000002' }, active('seller'));
     expect(selfFill.log.error?.code).toBe('NOT_AUTHORIZED');
 
@@ -142,7 +159,13 @@ describe('marketplace order book', () => {
       height: 105,
     });
     const filledEvent = outcome.events.find((e) => e.type === 'ORDER_FILLED');
-    expect(filledEvent).toMatchObject({ price: '12.345', royalty: '0.925', sellerProceeds: '11.420' });
+    expect(filledEvent).toMatchObject({
+      price: '12.345',
+      priceSymbol: 'SCE',
+      royalty: '0.925',
+      fee: '0.000',
+      sellerProceeds: '11.420',
+    });
 
     const order = await engine.order('ORD-00000002');
     expect(order).toMatchObject({
@@ -152,6 +175,7 @@ describe('marketplace order book', () => {
       settlement: {
         price: '12.345',
         royalty: '0.925',
+        fee: '0.000',
         sellerProceeds: '11.420',
         royaltyRecipient: 'creator',
         buyer: 'buyer',
@@ -166,8 +190,107 @@ describe('marketplace order book', () => {
       properties: { age: 5 },
     });
 
+    // step 4: the price actually moved (fee schedule still at its genesis zeros)
+    expect(await engine.balance('buyer', 'SCE')).toMatchObject({ quantity: '87.655' });
+    expect(await engine.balance('seller', 'SCE')).toMatchObject({ quantity: '11.42' });
+    expect(await engine.balance('creator', 'SCE')).toMatchObject({ quantity: '0.925' });
+    expect(await engine.balance('steempro.com', 'SCE')).toBeNull();
+
     const doubleFill = await engine.execFail('fillOrder', { orderId: 'ORD-00000002' }, active('mallory'));
     expect(doubleFill.log.error?.code).toBe('ORDER_NOT_OPEN');
+  });
+
+  it('routes the fillOrderFeeBps cut to the treasury out of the sale price', async () => {
+    await engine.execOk(
+      'setParam',
+      { fees: { fillOrderFeeBps: '200' } },
+      active('steempro.com'),
+      { height: 106 },
+      'engine',
+    );
+    await engine.execOk(
+      'placeOrder',
+      { symbol: 'DRAGON', id: '2', price: '12.345' },
+      active('seller'),
+      { height: 107 },
+    );
+    const outcome = await engine.execOk('fillOrder', { orderId: 'ORD-00000003' }, active('buyer'), {
+      height: 108,
+    });
+
+    // 12.345 * 2% = 0.2469 -> precision 3, rounded down
+    const order = await engine.order('ORD-00000003');
+    expect(order?.settlement).toMatchObject({
+      price: '12.345',
+      royalty: '0.925',
+      fee: '0.246',
+      sellerProceeds: '11.174',
+    });
+    expect(outcome.events.find((e) => e.type === 'ORDER_FILLED')).toMatchObject({ fee: '0.246' });
+
+    expect(await engine.balance('buyer', 'SCE')).toMatchObject({ quantity: '75.31' });
+    expect(await engine.balance('seller', 'SCE')).toMatchObject({ quantity: '22.594' });
+    expect(await engine.balance('creator', 'SCE')).toMatchObject({ quantity: '1.85' });
+    expect(await engine.balance('steempro.com', 'SCE')).toMatchObject({ quantity: '0.246' });
+  });
+
+  it('fails the whole fill when the buyer cannot afford it (no partial effects)', async () => {
+    await engine.execOk(
+      'placeOrder',
+      { symbol: 'DRAGON', id: '1', price: '50.000' },
+      active('buyer'),
+      { height: 109 },
+    );
+    const orderId = 'ORD-00000004';
+    const fill = await engine.execFail('fillOrder', { orderId }, active('stranger'), { height: 110 });
+    expect(fill.log.error?.code).toBe('INSUFFICIENT_BALANCE');
+
+    // nothing moved: order still open, NFT still with the seller, treasury untouched
+    expect(await engine.order(orderId)).toMatchObject({ status: 'OPEN', settlement: null });
+    expect(await engine.instance('DRAGON:1')).toMatchObject({
+      owner: 'buyer',
+      listedOrderId: orderId,
+    });
+    expect(await engine.balance('stranger', 'SCE')).toBeNull();
+    expect(await engine.balance('steempro.com', 'SCE')).toMatchObject({ quantity: '0.246' });
+  });
+
+  it('prices orders in an explicit token and enforces its precision', async () => {
+    await engine.execOk(
+      'create',
+      { symbol: 'GOLD', name: 'Gold Bars', precision: 2 },
+      active('creator'),
+      { height: 111 },
+      'tokens',
+    );
+
+    const unknownToken = await engine.execFail(
+      'placeOrder',
+      { symbol: 'DRAGON', id: '2', price: '1.00', priceSymbol: 'NOPE' },
+      active('buyer'),
+      { height: 112 },
+    );
+    expect(unknownToken.log.error?.code).toBe('TOKEN_NOT_FOUND');
+
+    const tooPrecise = await engine.execFail(
+      'placeOrder',
+      { symbol: 'DRAGON', id: '2', price: '5.555', priceSymbol: 'GOLD' },
+      active('buyer'),
+      { height: 112 },
+    );
+    expect(tooPrecise.log.error?.code).toBe('BAD_PRICE');
+
+    await engine.execOk(
+      'placeOrder',
+      { symbol: 'DRAGON', id: '2', price: '5.55', priceSymbol: 'GOLD' },
+      active('buyer'),
+      { height: 113 },
+    );
+    expect(await engine.order('ORD-00000005')).toMatchObject({
+      status: 'OPEN',
+      price: '5.55',
+      priceSymbol: 'GOLD',
+    });
   });
 
   it('keeps supply untouched by trades (ownership only moves)', async () => {

@@ -38,7 +38,7 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 | State integrity | sandbox returns *declarative mutations*; the host re-validates schema, entity allowlist (per contract), immutable fields, read-set integrity (unread-write / stale-read guards), supply/burn/groupBy invariants, fungible token invariants + the ledger **conservation invariant** (balance deltas must equal the supply delta per op), typed property rules and order finality (`src/vm/guard.ts`) |
 | Atomicity | one DB transaction per block: state + journal + logs + cursor commit together; advisory lock (`pg_advisory_xact_lock`) serialises block processing across replicas |
 | APIs | REST + GraphQL (Apollo Server 5) + WebSocket channels |
-| Tests | 138 tests across 15 suites (deterministic execution, wiki action semantics for all contracts, the fee engine, guards, journal, marketplace, parser) + integration suites for micro-fork rollbacks, the API surface, and an opt-in Postgres parity suite |
+| Tests | 141 tests across 15 suites (deterministic execution, wiki action semantics for all contracts, the fee engine, marketplace settlement, guards, journal, parser) + integration suites for micro-fork rollbacks, the API surface, and an opt-in Postgres parity suite |
 
 ## Quick start
 
@@ -60,7 +60,7 @@ lost on restart. That mode is for demos and tests only.
 ```bash
 cp .env.example .env          # edit DATABASE_URL
 docker compose up -d postgres
-npx prisma migrate deploy     # applies prisma/migrations (0001_init, 0002_wiki_nft_alignment, 0003_tokens)
+npx prisma migrate deploy     # applies prisma/migrations (0001_init, 0002_wiki_nft_alignment, 0003_tokens, 0004_order_price_symbol)
 npm start                     # node dist/src/index.js  (or: npm run build && npm start)
 ```
 
@@ -141,7 +141,7 @@ Errors are JSON: `{"error":{"code":"NOT_FOUND","message":"instance not found"}}`
   orders(status: OPEN) {
     id instanceId price seller
     instance { id owner }
-    settlement { royalty sellerProceeds buyer }
+    settlement { royalty fee sellerProceeds buyer }
   }
   logs(actor: "alice", limit: 5) { action status error }
   status { running cursorHeight sandbox storage stats { blocksApplied reorgs } }
@@ -219,8 +219,8 @@ Amounts are decimal strings, supplies and prices are strings; **no floats anywhe
 | `transfer` | `to, nfts: [{symbol, ids: [...]}]` (≤50 ids, ≤10 symbols) | **active** of each current owner (posting is not enough) |
 | `setProperties` | `symbol, nfts: [{id, properties}]` (≤50) | per-property `authorizedEditingAccounts` (posting is enough) |
 | `burn` | `nfts: [{symbol, ids: [...]}]` (≤50) | active of each current owner |
-| `placeOrder` | `symbol, id, price` (`"12.345"` STEEM) — *engine extension* | active of the owner |
-| `fillOrder` | `orderId` — *engine extension* | active of the buyer (not the seller) |
+| `placeOrder` | `symbol, id, price, priceSymbol? = SCE` (price decimals ≤ the price token's precision; the token row must exist) — *engine extension* | active of the owner |
+| `fillOrder` | `orderId` — settles atomically in one state txn: buyer → seller + royalty + `fillOrderFeeBps` treasury cut, NFT → buyer — *engine extension* | active of the buyer (not the seller) |
 | `cancelOrder` | `orderId` — *engine extension* | active of the seller |
 
 ### `tokens` contract actions (fungible)
@@ -365,8 +365,9 @@ tests/        unit/ · integration/ · helpers/
 
 ## Known limitations
 
-* Settlement is recorded on-chain-equivalent state only — no STEEM actually moves; a
-  production deployment must pair the DEX with a real escrow/payment operation.
+* Settlement moves engine-internal token balances (any `tokens` symbol, default `SCE`)
+  atomically; no native/off-engine currency is escrowed — bridging a pegged STEEM-side
+  token is a later phase.
 * The API is read-only and unauthenticated; rate limiting and auth are expected at the
   ingress layer.
 * One engine instance should own the ingestion cursor per database (the advisory lock

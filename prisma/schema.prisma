@@ -126,9 +126,10 @@ model MarketOrderRecord {
   symbol           String
   instanceId       String
   seller           String
-  /// Decimal string in STEEM (3 dp)
+  /// Decimal string in the price token (precision-capped at placement)
   price            String
-  currency         String
+  /// Settlement currency: symbol of an existing `tokens` row (default SCE)
+  priceSymbol      String
   status           String
   /// Royalty snapshot taken at placement time
   royaltyBps       String

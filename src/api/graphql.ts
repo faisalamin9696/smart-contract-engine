@@ -94,6 +94,7 @@ const typeDefs = /* GraphQL */ `
   type Settlement {
     price: String!
     royalty: String!
+    fee: String
     sellerProceeds: String!
     royaltyRecipient: String!
     buyer: String!
@@ -107,7 +108,7 @@ const typeDefs = /* GraphQL */ `
     instanceId: String!
     seller: String!
     price: String!
-    currency: String!
+    priceSymbol: String!
     status: OrderStatus!
     royaltyBps: String!
     royaltyRecipient: String!

@@ -144,7 +144,7 @@ describe('fee engine (build order step 3)', () => {
       next(),
       'tokens',
     );
-    // 2. The admin raises the schedule to its target values (fillOrder stays step 4).
+    // 2. The admin raises the schedule to its target values (the fillOrder cut is charged at settlement — step 4).
     const raised = await engine.execOk(
       'setParam',
       {

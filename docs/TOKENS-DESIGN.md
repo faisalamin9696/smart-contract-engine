@@ -146,6 +146,11 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
   cut, **and** NFT ownership → buyer (existing logic), all under the 30-block
   undo buffer
 - Insufficient balance → `INSUFFICIENT_BALANCE` fail (no partial effects)
+- Both royalty and the platform cut derive from `price` (ROUND_DOWN at the
+  price token's precision); `sellerProceeds = price − royalty − fee`;
+  `royalty + fee > price` fails `SETTLEMENT_ERROR`, and legs sharing a holder
+  (seller == royalty recipient, treasury == buyer, ...) are summed into net
+  deltas before writing, so the per-op conservation invariant holds exactly.
 
 ## Build order
 
@@ -158,7 +163,13 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
    `create`/`addProperty`(4th+)/`issue` — **done 2026-10-08** (implemented as
    `engine.setParam` + `chargeFee()`; also wired `issueMultiple` (per item) and
    tokens `create`/`issue`; `MemoryStore` seeds the genesis param row)
-4. Settlement: `priceSymbol` + atomic `fillOrder`
+4. Settlement: `priceSymbol` + atomic `fillOrder` — **done 2026-10-09**
+   (`placeOrder` validates `priceSymbol` against an existing token row and
+   caps the price at its precision; `fillOrder` debits the buyer and credits
+   seller + royalty + the `fillOrderFeeBps` treasury cut in one state txn —
+   `INSUFFICIENT_BALANCE` fails the whole op; migration
+   `0004_order_price_symbol` renames the order column, legacy `STEEM` rows
+   fail fill with `TOKEN_NOT_FOUND` but stay cancellable)
 5. API/WS: GraphQL/REST `tokens`, `token(symbol)`, `balances(account)`,
    `params`; WS events `TOKEN_*` / `BALANCE_*`
 6. Frontend (`E:\SteemNft`): builder.ts new actions + AUTH rows, wallet
@@ -191,7 +202,7 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
 ## Repo state at handoff
 
 - Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
-  (private), main with build-order steps 1–3 + genesis helper; gates before push:
+  (private), main with build-order steps 1–4 + genesis helper; gates before push:
   `npx tsc --noEmit`, `npx jest --runInBand`, `npm run build`,
   `npx js-yaml <compose>`, `sh -n docker-entrypoint.sh`
 - Frontend: `E:\SteemNft` (not a git repo yet); typecheck + build green;

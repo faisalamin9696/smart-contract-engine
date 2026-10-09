@@ -93,7 +93,7 @@ function order(id: string, symbol: string, instanceId: string, seller: string, c
     instanceId,
     seller,
     price: '12.345',
-    currency: 'STEEM',
+    priceSymbol: 'SCE',
     status: 'OPEN',
     royaltyBps: '500',
     royaltyRecipient: 'alice',

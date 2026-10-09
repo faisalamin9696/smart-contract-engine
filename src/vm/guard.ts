@@ -51,7 +51,7 @@ const IMMUTABLE_FIELDS: Record<EntityKind, readonly string[]> = {
     'instanceId',
     'seller',
     'price',
-    'currency',
+    'priceSymbol',
     'royaltyBps',
     'royaltyRecipient',
     'createdAtBlock',

@@ -332,7 +332,7 @@ const UpdateOrgNameParams = z.object({ symbol: SymbolSchema, orgName: NameSchema
 const UpdateProductNameParams = z.object({ symbol: SymbolSchema, productName: NameSchema }).strict();
 
 const PlaceOrderParams = z
-  .object({ symbol: SymbolSchema, id: TokenIdSchema, price: AmountSchema })
+  .object({ symbol: SymbolSchema, id: TokenIdSchema, price: QuantitySchema, priceSymbol: SymbolSchema.optional() })
   .strict();
 const FillOrderParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
 const CancelOrderParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
@@ -586,7 +586,8 @@ export function parseEnvelope(rawJson: string): Envelope {
 /**
  * Entities each action is allowed to mutate (defense-in-depth allow list,
  * scoped per contract — several action names appear in more than one list).
- * Fee-bearing actions may additionally move `balance` rows (payer → treasury).
+ * Fee-bearing actions may additionally move `balance` rows (payer → treasury), and
+ * `nft.fillOrder` moves them as marketplace settlement (buyer → seller + royalty + treasury).
  */
 export const ACTION_ENTITY_ALLOWLIST: {
   nft: Record<NftActionName, readonly string[]>;
@@ -615,7 +616,7 @@ export const ACTION_ENTITY_ALLOWLIST: {
     transfer: ['instance', 'account'],
     burn: ['collection', 'instance'],
     placeOrder: ['order', 'instance', 'account', 'meta'],
-    fillOrder: ['order', 'instance', 'account'],
+    fillOrder: ['order', 'instance', 'account', 'balance'],
     cancelOrder: ['order', 'instance'],
     // `meta` is only touched by counter increments, never by account/collection code paths.
   },

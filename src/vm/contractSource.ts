@@ -342,9 +342,9 @@ export const CONTRACT_SOURCE = `
     return out;
   }
 
-  function splitRoyalty(price, royaltyBps) {
-    if (typeof price !== 'string' || !RE_AMOUNT.test(price)) {
-      fail('BAD_PRICE', 'price must be a decimal string with at most 3 fractional digits');
+  function splitRoyalty(price, royaltyBps, precision) {
+    if (typeof price !== 'string' || !RE_DECIMAL.test(price)) {
+      fail('BAD_PRICE', 'price must be a decimal string with at most 8 fractional digits');
     }
     if (typeof royaltyBps !== 'string' || !RE_UINT.test(royaltyBps)) {
       fail('BAD_ROYALTY', 'royaltyBps must be an unsigned integer string');
@@ -353,15 +353,16 @@ export const CONTRACT_SOURCE = `
     if (!amount.gt(0)) fail('BAD_PRICE', 'price must be greater than zero');
     var bps = new BigNumber(royaltyBps);
     if (bps.gt(10000)) fail('BAD_ROYALTY', 'royaltyBps must not exceed 10000');
-    var royalty = amount.times(bps).div(10000).decimalPlaces(3, BigNumber.ROUND_DOWN);
-    var proceeds = amount.minus(royalty).decimalPlaces(3, BigNumber.ROUND_DOWN);
+    var places = precision === undefined ? 3 : precision;
+    var royalty = amount.times(bps).div(10000).decimalPlaces(places, BigNumber.ROUND_DOWN);
+    var proceeds = amount.minus(royalty);
     if (royalty.plus(proceeds).comparedTo(amount) !== 0) {
       fail('SETTLEMENT_ERROR', 'royalty split does not reconcile');
     }
     return {
       price: amount.toFixed(),
-      royalty: royalty.toFixed(3),
-      sellerProceeds: proceeds.toFixed(3),
+      royalty: royalty.toFixed(places),
+      sellerProceeds: proceeds.toFixed(places),
     };
   }
 
@@ -959,11 +960,25 @@ export const CONTRACT_SOURCE = `
       fail('ALREADY_LISTED', 'instance ' + key + ' is already listed as ' + instance.listedOrderId);
     }
     var collection = loadCollection(S, instance.symbol);
-    if (typeof p.price !== 'string' || !RE_AMOUNT.test(p.price)) {
-      fail('BAD_PRICE', 'price must be a decimal string with at most 3 fractional digits');
+    var priceSymbol = p.priceSymbol === undefined ? 'SCE' : p.priceSymbol;
+    if (typeof priceSymbol !== 'string' || !RE_SYMBOL.test(priceSymbol)) {
+      fail('BAD_SYMBOL', 'priceSymbol must be 3 to 10 uppercase letters');
+    }
+    var priceToken = read(S, 'token', priceSymbol);
+    if (priceToken === null) {
+      fail('TOKEN_NOT_FOUND', 'token ' + priceSymbol + ' does not exist yet');
+    }
+    if (typeof p.price !== 'string' || !RE_DECIMAL.test(p.price)) {
+      fail('BAD_PRICE', 'price must be a decimal string with at most 8 fractional digits');
     }
     var amount = new BigNumber(p.price);
     if (!amount.gt(0)) fail('BAD_PRICE', 'price must be greater than zero');
+    if (amount.decimalPlaces() > priceToken.precision) {
+      fail(
+        'BAD_PRICE',
+        'price has ' + amount.decimalPlaces() + ' fractional digits but ' + priceSymbol + ' has precision ' + priceToken.precision
+      );
+    }
 
     var orderId = nextOrderId(S, M);
     var order = {
@@ -972,7 +987,7 @@ export const CONTRACT_SOURCE = `
       instanceId: key,
       seller: instance.owner,
       price: amount.toFixed(),
-      currency: 'STEEM',
+      priceSymbol: priceSymbol,
       status: 'OPEN',
       royaltyBps: collection.royaltyBps,
       royaltyRecipient: collection.royaltyRecipient,
@@ -994,6 +1009,7 @@ export const CONTRACT_SOURCE = `
       instanceId: key,
       orderId: orderId,
       price: order.price,
+      priceSymbol: order.priceSymbol,
       account: instance.owner,
     });
   }
@@ -1026,15 +1042,51 @@ export const CONTRACT_SOURCE = `
       fail('LISTING_MISMATCH', 'instance ' + instance.id + ' is not listed as ' + order.id);
     }
 
-    var split = splitRoyalty(order.price, order.royaltyBps);
+    var param = read(S, 'param', PARAM_KEY);
+    if (param === null) fail('PARAM_NOT_FOUND', 'fee parameter row is missing');
+    var priceToken = read(S, 'token', order.priceSymbol);
+    if (priceToken === null) {
+      fail('TOKEN_NOT_FOUND', 'token ' + order.priceSymbol + ' does not exist');
+    }
+    var feeBpsValue = param.fees.fillOrderFeeBps;
+    if (typeof feeBpsValue !== 'string') fail('BAD_FEE_KEY', 'fillOrderFeeBps is missing from the fee schedule');
+    var split = splitRoyalty(order.price, order.royaltyBps, priceToken.precision);
+    var price = new BigNumber(order.price);
+    var fee = price.times(new BigNumber(feeBpsValue)).div(10000).decimalPlaces(priceToken.precision, BigNumber.ROUND_DOWN);
+    if (fee.plus(split.royalty).gt(price)) {
+      fail('SETTLEMENT_ERROR', 'royalty plus the fillOrder fee exceed the price');
+    }
+    var proceeds = price.minus(split.royalty).minus(fee);
     var settlement = {
       price: split.price,
       royalty: split.royalty,
-      sellerProceeds: split.sellerProceeds,
+      fee: fee.toFixed(priceToken.precision),
+      sellerProceeds: proceeds.toFixed(priceToken.precision),
       royaltyRecipient: order.royaltyRecipient,
       buyer: buyer,
       seller: order.seller,
     };
+
+    var buyerBalance = loadBalance(S, buyer, order.priceSymbol);
+    if (new BigNumber(buyerBalance.quantity).lt(price)) {
+      fail(
+        'INSUFFICIENT_BALANCE',
+        buyer + ' has ' + buyerBalance.quantity + ' ' + order.priceSymbol + ' but the order costs ' + order.price
+      );
+    }
+    var deltas = {};
+    var legs = [
+      [buyer, price.times(-1)],
+      [order.seller, proceeds],
+      [order.royaltyRecipient, split.royalty],
+      [param.treasury, fee],
+    ];
+    for (var li = 0; li < legs.length; li++) {
+      var legAccount = legs[li][0];
+      if (!has(deltas, legAccount)) deltas[legAccount] = new BigNumber(0);
+      deltas[legAccount] = deltas[legAccount].plus(legs[li][1]);
+    }
+    settleDeltas(S, M, order.priceSymbol, deltas);
 
     var nextInstance = copy(instance);
     nextInstance.previousAccount = instance.owner;
@@ -1056,7 +1108,9 @@ export const CONTRACT_SOURCE = `
       instanceId: order.instanceId,
       orderId: order.id,
       price: settlement.price,
+      priceSymbol: order.priceSymbol,
       royalty: settlement.royalty,
+      fee: settlement.fee,
       sellerProceeds: settlement.sellerProceeds,
       account: buyer,
     });
@@ -1107,6 +1161,30 @@ export const CONTRACT_SOURCE = `
     var balance = read(S, 'balance', account + ':' + symbol);
     if (balance === null) return { account: account, symbol: symbol, quantity: '0' };
     return balance;
+  }
+
+  /**
+   * Marketplace settlement (step 4): applies net balance deltas in one write set.
+   * Legs that share a holder (seller == royalty recipient, treasury == buyer, ...)
+   * are summed first so no credit overwrites another; by construction
+   * sellerProceeds + royalty + fee === price, so the op still nets to zero.
+   */
+  function settleDeltas(S, M, symbol, deltas) {
+    for (var account in deltas) {
+      if (!has(deltas, account)) continue;
+      var delta = deltas[account];
+      if (delta.isZero()) continue;
+      var balance = loadBalance(S, account, symbol);
+      var quantity = new BigNumber(balance.quantity).plus(delta);
+      if (quantity.lt(0)) {
+        fail('INSUFFICIENT_BALANCE', account + ' would end up with ' + quantity.toFixed() + ' ' + symbol);
+      }
+      write(S, M, 'balance', account + ':' + symbol, {
+        account: account,
+        symbol: symbol,
+        quantity: quantity.toFixed(),
+      });
+    }
   }
 
   /** Wiki quantities: decimal string, > 0, fractional digits <= the token's precision. */
