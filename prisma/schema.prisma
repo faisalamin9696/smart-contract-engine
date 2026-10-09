@@ -1,4 +1,4 @@
-// SteemCraft L2 NFT Engine — persistence schema.
+// SmartContractEngine (SCE) — L2 NFT Engine — persistence schema.
 //
 // Design notes:
 //  * Every *mutable* state entity (collections/instances/accounts/orders/meta) has a typed

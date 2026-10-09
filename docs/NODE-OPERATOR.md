@@ -28,8 +28,8 @@ endpoints and a database.
 ## 2. Install
 
 ```bash
-git clone https://github.com/faisalamin9696/steem-craft-engine.git
-cd steem-craft-engine
+git clone https://github.com/faisalamin9696/smart-contract-engine.git
+cd smart-contract-engine
 npm ci
 cp .env.example .env       # then edit — at minimum DATABASE_URL and STEEM_RPC_ENDPOINTS
 npx prisma generate

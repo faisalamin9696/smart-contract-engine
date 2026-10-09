@@ -282,7 +282,7 @@ a full audit pass over the trust boundaries plus the pieces an outside operator 
 
 ## Repo state at handoff
 
-- Engine: `E:\SteemCraftEngine` → GitHub `faisalamin9696/steem-craft-engine`
+- Engine: `E:\SmartContractEngine` → GitHub `faisalamin9696/smart-contract-engine`
   (private), main with build-order steps 1–7 + genesis helper + the pre-release
   reset migration `0005_reset_legacy_state` (truncates all state tables and
   re-seeds the all-zero `param` bootstrap; applied in production 2026-10-09;
