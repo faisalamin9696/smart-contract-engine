@@ -127,13 +127,20 @@ export class FailoverRpc implements SteemRpc {
   }
 
   private markSuccess(endpoint: EndpointState): void {
+    if (endpoint.consecutiveFailures > 0) {
+      this.log.info('rpc endpoint recovered', {
+        endpoint: endpoint.url,
+        afterFailures: endpoint.consecutiveFailures,
+        lastError: endpoint.lastError,
+      });
+    }
     endpoint.consecutiveFailures = 0;
     endpoint.cooldownUntil = 0;
     endpoint.lastError = null;
     this.preferred = this.endpoints.indexOf(endpoint);
   }
 
-  private markFailure(endpoint: EndpointState, err: unknown): void {
+  private markFailure(endpoint: EndpointState, err: unknown, call: string): void {
     endpoint.consecutiveFailures += 1;
     const message = err instanceof Error ? err.message : String(err);
     endpoint.lastError = message;
@@ -141,6 +148,7 @@ export class FailoverRpc implements SteemRpc {
     endpoint.cooldownUntil = Date.now() + backoff;
     this.log.warn('rpc endpoint failed', {
       endpoint: endpoint.url,
+      call,
       failures: endpoint.consecutiveFailures,
       cooldownMs: backoff,
       error: message,
@@ -160,7 +168,7 @@ export class FailoverRpc implements SteemRpc {
         this.markSuccess(endpoint);
         return result;
       } catch (err) {
-        this.markFailure(endpoint, err);
+        this.markFailure(endpoint, err, `${api}.${method}`);
         lastError = err;
       }
     }

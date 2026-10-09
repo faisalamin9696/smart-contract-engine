@@ -368,6 +368,11 @@ tests/        unit/ · integration/ · helpers/
 * Settlement moves engine-internal token balances (any `tokens` symbol, default `SCE`)
   atomically; no native/off-engine currency is escrowed — bridging a pegged STEEM-side
   token is a later phase.
+* Public Steem RPC endpoints fail intermittently (node-side errors such as
+  `Invalid cast from object_type to Array`, or slow `get_dynamic_global_properties`);
+  the failover client rotates past them with exponential cooldown and logs
+  `rpc endpoint recovered` on success. If ingestion looks stalled, check `GET /health`
+  (`cursorHeight` vs `headHeight`) before assuming an engine fault.
 * The API is read-only and unauthenticated; rate limiting and auth are expected at the
   ingress layer.
 * One engine instance should own the ingestion cursor per database (the advisory lock
