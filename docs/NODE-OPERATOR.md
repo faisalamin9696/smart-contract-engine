@@ -38,6 +38,10 @@ npm run build
 npm start                  # node dist/src/index.js
 ```
 
+> The repository is currently **private** — ask the maintainer for read access to the
+> clone URL above. Nothing else about running a node requires approval: RPC endpoints
+> are public, and state agreement is proven by the checksum, not by an authority.
+
 Docker users: see the compose variants in the README (the image entrypoint runs
 `prisma migrate deploy` for you, so no deploy tool can skip migrations).
 
