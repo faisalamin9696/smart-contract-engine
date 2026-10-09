@@ -1,7 +1,13 @@
 import { EventEmitter } from 'node:events';
 import type { EngineEvent } from '../types/domain';
 
-export type EventChannel = '*' | `account:${string}` | `collection:${string}` | 'market' | 'chain';
+export type EventChannel =
+  | '*'
+  | `account:${string}`
+  | `collection:${string}`
+  | `token:${string}`
+  | 'market'
+  | 'chain';
 
 export interface Subscription {
   id: string;
@@ -41,9 +47,16 @@ export class EngineEventBus {
 export function channelsFor(event: EngineEvent): EventChannel[] {
   const channels: EventChannel[] = ['*'];
   if (event.account) channels.push(`account:${event.account}`);
+  const fungible = event.type.startsWith('TOKEN_') || event.type.startsWith('BALANCE_');
   if (event.symbol) {
-    channels.push(`collection:${event.symbol}`);
-    channels.push('market');
+    if (fungible) {
+      // Fungible-token events stay on the token lane — a matching symbol string
+      // does not make them NFT collection or marketplace activity.
+      channels.push(`token:${event.symbol}`);
+    } else {
+      channels.push(`collection:${event.symbol}`);
+      channels.push('market');
+    }
   }
   if (event.type.startsWith('ORDER_')) channels.push('market');
   if (event.type === 'BLOCK_APPLIED' || event.type.startsWith('REORG')) channels.push('chain');

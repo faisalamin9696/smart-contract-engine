@@ -1,5 +1,6 @@
 import type { OpResult, ParsedOp } from '../chain/opParser';
 import type {
+  Balance,
   EngineEvent,
   JsonMap,
   JsonValue,
@@ -85,6 +86,44 @@ function baseLog(
     events: null,
     timestamp: block.timestamp,
   };
+}
+
+/**
+ * One `BALANCE_CHANGED` event per holder whose balance row actually moved.
+ *
+ * Synthesized host-side from the committed write-set (never in the guest), so every
+ * credit and debit is covered — token issue/transfer/burn legs, fee debits and
+ * marketplace settlement legs — without touching consensus-critical contract code.
+ * One event per key: the last write wins, matching the row that was committed, and
+ * rows whose quantity did not change are skipped.
+ */
+function balanceChangedEvents(
+  mutations: readonly Mutation[],
+  snapshot: StateSnapshot,
+  block: BlockHeader,
+  op: { txId: string; action: string },
+): EngineEvent[] {
+  const balances = new Map<string, Mutation>();
+  for (const mutation of mutations) {
+    if (mutation.entity === 'balance') balances.set(mutation.key, mutation);
+  }
+  const events: EngineEvent[] = [];
+  for (const [key, mutation] of balances) {
+    const after = mutation.value as unknown as Balance | null;
+    if (after === null || typeof after.quantity !== 'string') continue;
+    const previous = snapshot.balance[key]?.quantity ?? '0';
+    if (previous === after.quantity) continue;
+    events.push({
+      type: 'BALANCE_CHANGED',
+      block: block.height,
+      txId: op.txId,
+      timestamp: block.timestamp,
+      account: after.account,
+      symbol: after.symbol,
+      data: { previous, balance: after.quantity, action: op.action },
+    });
+  }
+  return events;
 }
 
 /**
@@ -229,7 +268,10 @@ export async function executeOp(args: ExecuteOpArgs): Promise<OpOutcome> {
     };
   }
 
-  const vmEvents = response.events.map((event) => ({ ...event, txId: parsedOp.txId }));
+  const vmEvents = [
+    ...response.events.map((event) => ({ ...event, txId: parsedOp.txId })),
+    ...balanceChangedEvents(mutations, snapshot, block, parsedOp),
+  ];
   const instanceFromEvents = vmEvents.find((e) => typeof e.instanceId === 'string')?.instanceId ?? null;
   const log = baseLog(block, parsedOp, 'APPLIED', parsedOp.action, parsedOp.params, null);
   log.symbol = bestEffort(parsedOp.params, 'symbol') ?? vmEvents.find((e) => e.symbol)?.symbol ?? null;

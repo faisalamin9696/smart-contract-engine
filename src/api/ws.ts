@@ -21,7 +21,8 @@ const SYMBOL_RE = /^[A-Z][A-Z0-9]{2,11}$/;
 /**
  * Validates a channel name.
  *
- * Accepted: `*`, `market`, `chain`, `account:<name>`, `collection:<symbol>`.
+ * Accepted: `*`, `market`, `chain`, `account:<name>`, `collection:<symbol>`,
+ * `token:<symbol>`.
  * Anything else is rejected up front so a client cannot flood the bus with garbage
  * listeners.
  */
@@ -30,6 +31,7 @@ export function isValidChannel(channel: unknown): channel is EventChannel {
   if (typeof channel !== 'string') return false;
   if (channel.startsWith('account:')) return ACCOUNT_RE.test(channel.slice(8));
   if (channel.startsWith('collection:')) return SYMBOL_RE.test(channel.slice(11));
+  if (channel.startsWith('token:')) return SYMBOL_RE.test(channel.slice(6));
   return false;
 }
 
@@ -131,7 +133,7 @@ export class WebSocketHub {
     this.send(socket, {
       type: 'welcome',
       timestamp: new Date().toISOString(),
-      channels: ['*', 'account:<name>', 'collection:<SYMBOL>', 'market', 'chain'],
+      channels: ['*', 'account:<name>', 'collection:<SYMBOL>', 'token:<SYMBOL>', 'market', 'chain'],
       protocol: { subscribe: 'subscribe', unsubscribe: 'unsubscribe', ping: 'ping' },
     });
 

@@ -1,10 +1,12 @@
 # Tokens Contract — Design Brief (Phase 1)
 
-Status: **Phase 1 in progress** — build order steps 1–3 done (step 1: migration 0003 +
+Status: **Phase 1 in progress** — build order steps 1–5 done (step 1: migration 0003 +
 store layer, 2026-10-07; step 2: contract-scoped dispatch, tokens handlers, guard
 conservation, 2026-10-08; step 3: fee engine — `engine.setParam`, `chargeFee()`
 wired into nft create/addProperty(4th+)/issue(+issueMultiple)/tokens create/issue,
-2026-10-08)
+2026-10-08; step 4: atomic `fillOrder` settlement with `priceSymbol`, 2026-10-09;
+step 5: token/balance/params reads over REST + GraphQL, WS `token:<SYMBOL>`
+channel and `BALANCE_CHANGED` events, 2026-10-09)
 Wiki source: https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md
 
 ## Goal
@@ -171,7 +173,15 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
    `0004_order_price_symbol` renames the order column, legacy `STEEM` rows
    fail fill with `TOKEN_NOT_FOUND` but stay cancellable)
 5. API/WS: GraphQL/REST `tokens`, `token(symbol)`, `balances(account)`,
-   `params`; WS events `TOKEN_*` / `BALANCE_*`
+   `params`; WS events `TOKEN_*` / `BALANCE_*` — **done 2026-10-09**
+   (REST `/tokens`, `/tokens/:symbol`, `/balances` (`account` required),
+   `/params`; GraphQL `tokens`/`token`/`balances`/`params` + `Token`,
+   `Balance`, `Params`, `FeeSchedule` types; `TOKEN_*`/`BALANCE_*` route to a
+   new `token:<SYMBOL>` channel instead of the NFT `collection:`/`market`
+   lanes; `BALANCE_CHANGED` is synthesized host-side from the committed
+   write-set — one event per holder whose balance row moved, so transfers,
+   issues, burns, fee debits and settlement legs all reach `account:` channel
+   subscribers without touching guest code)
 6. Frontend (`E:\SteemNft`): builder.ts new actions + AUTH rows, wallet
    balance in topbar, fee line + pre-Keychain balance check in fee dialogs,
    GraphQL queries/types

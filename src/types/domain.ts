@@ -313,6 +313,12 @@ export type EngineEventType =
   | 'TOKEN_BURNED'
   /** `tokens` contract: url/metadata/issuer/precision updated (`data.field` says which). */
   | 'TOKEN_UPDATED'
+  /**
+   * A holder's balance row changed (issue/transfer/burn legs, fee debits, marketplace
+   * settlement). Synthesized host-side from the committed write-set so every credit and
+   * debit reaches account-channel subscribers, even when no `TOKEN_*` event names it.
+   */
+  | 'BALANCE_CHANGED'
   /** `engine` contract: the admin raised/changed the in-state fee schedule. */
   | 'PARAM_UPDATED'
   /** One item of a batch action (wiki `issueMultiple`) failed while others succeeded. */

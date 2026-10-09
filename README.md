@@ -112,6 +112,9 @@ curl localhost:4000/health
 | `/instances?owner&symbol&limit&offset` · `/instances/:id` · `/instances/:symbol/:id` | filtered inventory |
 | `/accounts/:name` · `/accounts/:name/instances` | account profile + inventory |
 | `/orders?status&symbol&seller&limit&offset` · `/orders/:id` | marketplace book |
+| `/tokens?issuer&limit&offset` · `/tokens/:symbol` | fungible tokens (wiki `tokens` contract) |
+| `/balances?account&symbol&limit&offset` | token balances for one account (`account` required) |
+| `/params` | admin, treasury and the in-state fee schedule |
 | `/logs?actor&instanceId&symbol&height&status&limit&offset` | execution history |
 | `/blocks/latest` · `/blocks/:height` | indexed block cursor |
 
@@ -138,6 +141,10 @@ Errors are JSON: `{"error":{"code":"NOT_FOUND","message":"instance not found"}}`
     instances(owner: "alice") { id owner listedOrderId previousAccount }
   }
   instance(id: "DRAGON:573") { id owner }
+  tokens(issuer: "alice") { symbol precision supply maxSupply issuer }
+  token(symbol: "SCE") { name metadata }
+  balances(account: "bob") { symbol quantity }
+  params { admin treasury fees { tokenCreationFee fillOrderFeeBps } feeTokens }
   orders(status: OPEN) {
     id instanceId price seller
     instance { id owner }
@@ -165,15 +172,19 @@ Custom `JSON` scalar refuses floating-point literals (the engine never produces 
 {"type":"ping"}   // → {"type":"pong","timestamp":"..."}
 ```
 
-Channels: `*` (everything), `account:<name>`, `collection:<SYMBOL>`, `market`, `chain`.
+Channels: `*` (everything), `account:<name>`, `collection:<SYMBOL>`, `token:<SYMBOL>`,
+`market`, `chain`. `TOKEN_*` and `BALANCE_CHANGED` events go to `token:<SYMBOL>` +
+`account:<name>` (never to the NFT `collection:`/`market` lanes); `BALANCE_CHANGED`
+fires once per holder whose balance row moved — transfers, issues, burns, fee debits
+and settlement legs.
 Invalid channel names, oversized frames and more than 100 subscriptions per socket are
 rejected with `{"type":"error","message":...}`.
 
 Event types: `BLOCK_APPLIED`, `COLLECTION_CREATED`, `NFT_MINTED`, `NFT_RECEIVED`,
 `NFT_TRANSFERRED`, `PROPERTIES_UPDATED`, `NFT_BURNED`, `ORDER_PLACED`, `ORDER_FILLED`,
 `ORDER_CANCELLED`, `TOKEN_CREATED`, `TOKEN_ISSUED`, `TOKEN_TRANSFERRED`,
-`TOKEN_BURNED`, `TOKEN_UPDATED`, `PARAM_UPDATED`, `ITEM_FAILED`, `TX_FAILED`,
-`REORG_DETECTED`, `REORG_APPLIED`, `ENGINE_HALTED`.
+`TOKEN_BURNED`, `TOKEN_UPDATED`, `BALANCE_CHANGED`, `PARAM_UPDATED`, `ITEM_FAILED`,
+`TX_FAILED`, `REORG_DETECTED`, `REORG_APPLIED`, `ENGINE_HALTED`.
 
 ## Writing to the engine
 

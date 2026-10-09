@@ -1,7 +1,15 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 
 import type { Indexer } from '../indexer/indexer';
-import { getAccount, getCollection, getInstance, getOrder, type EngineStore } from '../state/store';
+import {
+  getAccount,
+  getCollection,
+  getInstance,
+  getOrder,
+  getParam,
+  getToken,
+  type EngineStore,
+} from '../state/store';
 import type { Logger } from '../logger';
 
 export interface RestDeps {
@@ -231,6 +239,49 @@ export function createRestRouter(deps: RestDeps): Router {
       const order = await getOrder(store, req.params.id);
       if (!order) throw httpError(404, 'NOT_FOUND', 'order not found');
       res.json({ data: order });
+    }),
+  );
+
+  // ---- fungible tokens -----------------------------------------------------
+
+  router.get(
+    '/tokens',
+    wrap(async (req, res) => {
+      const { limit, offset } = page(req);
+      const issuer = strParam(req, 'issuer');
+      const data = await store.listTokens({ issuer, limit, offset });
+      res.json({ data, meta: { limit, offset, count: data.length } });
+    }),
+  );
+
+  router.get(
+    '/tokens/:symbol',
+    wrap(async (req, res) => {
+      const token = await getToken(store, req.params.symbol);
+      if (!token) throw httpError(404, 'NOT_FOUND', 'token not found');
+      res.json({ data: token });
+    }),
+  );
+
+  router.get(
+    '/balances',
+    wrap(async (req, res) => {
+      const account = strParam(req, 'account');
+      if (!account) throw httpError(400, 'BAD_REQUEST', 'account is required');
+      const symbol = strParam(req, 'symbol');
+      const { limit, offset } = page(req);
+      const data = await store.listBalances({ account, symbol, limit, offset });
+      const total = await store.countBalances({ account, symbol });
+      res.json({ data, meta: { limit, offset, total } });
+    }),
+  );
+
+  router.get(
+    '/params',
+    wrap(async (_req, res) => {
+      const params = await getParam(store);
+      if (!params) throw httpError(404, 'NOT_FOUND', 'params not found');
+      res.json({ data: params });
     }),
   );
 

@@ -2,7 +2,15 @@ import { ApolloServer, HeaderMap, type HTTPGraphQLRequest } from '@apollo/server
 import { GraphQLError, GraphQLScalarType, Kind, type ValueNode } from 'graphql';
 import type { NextFunction, Request, Response } from 'express';
 
-import { getAccount, getCollection, getInstance, getOrder, type EngineStore } from '../state/store';
+import {
+  getAccount,
+  getCollection,
+  getInstance,
+  getOrder,
+  getParam,
+  getToken,
+  type EngineStore,
+} from '../state/store';
 import type { Indexer } from '../indexer/indexer';
 import type { Logger } from '../logger';
 
@@ -91,6 +99,50 @@ const typeDefs = /* GraphQL */ `
     instanceCount: Int!
   }
 
+  "Fungible token row (wiki tokens contract)."
+  type Token {
+    symbol: String!
+    name: String!
+    "Decimal places (0-8)"
+    precision: Int!
+    "0 = unlimited"
+    maxSupply: String!
+    "Issued minus burned (decimal string)"
+    supply: String!
+    issuer: String!
+    url: String!
+    "Free-form metadata (plain string, at most 1000 chars)"
+    metadata: String!
+    createdAtBlock: Int!
+    createdAt: String!
+  }
+
+  "One holder's balance for one token (keyed account + symbol)."
+  type Balance {
+    account: String!
+    symbol: String!
+    quantity: String!
+  }
+
+  "In-state engine parameters: admin, treasury and the fee schedule."
+  type Params {
+    admin: String!
+    treasury: String!
+    fees: FeeSchedule!
+    "Symbols accepted for fee payment (chargeFee validation)"
+    feeTokens: [String!]!
+  }
+
+  "Fee schedule charged on state-changing actions."
+  type FeeSchedule {
+    nftCreationFee: String!
+    addPropertyFee: String!
+    tokenCreationFee: String!
+    issueFee: String!
+    "Marketplace fill fee in basis points, credited to the treasury"
+    fillOrderFeeBps: String!
+  }
+
   type Settlement {
     price: String!
     royalty: String!
@@ -177,6 +229,15 @@ const typeDefs = /* GraphQL */ `
     instances(owner: String, symbol: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Instance!]!
     instance(id: String!, symbol: String): Instance
     account(name: String!): Account
+    tokens(issuer: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Token!]!
+    token(symbol: String!): Token
+    balances(
+      account: String!
+      symbol: String
+      limit: Int = ${DEFAULT_LIMIT}
+      offset: Int = 0
+    ): [Balance!]!
+    params: Params
     orders(status: OrderStatus, symbol: String, seller: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Order!]!
     order(id: String!): Order
     logs(actor: String, instanceId: String, symbol: String, height: Int, status: TxStatus, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [TransactionLog!]!
@@ -269,6 +330,34 @@ function buildResolvers() {
 
       account: (_: unknown, args: { name: string }, ctx: GraphQLContext) =>
         getAccount(ctx.store, args.name),
+
+      tokens: (
+        _: unknown,
+        args: { issuer?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listTokens({
+          issuer: args.issuer ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      token: (_: unknown, args: { symbol: string }, ctx: GraphQLContext) =>
+        getToken(ctx.store, args.symbol),
+
+      balances: (
+        _: unknown,
+        args: { account: string; symbol?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listBalances({
+          account: args.account,
+          symbol: args.symbol ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      params: (_: unknown, __: unknown, ctx: GraphQLContext) => getParam(ctx.store),
 
       orders: (
         _: unknown,

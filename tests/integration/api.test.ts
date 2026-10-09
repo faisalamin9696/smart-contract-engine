@@ -60,6 +60,15 @@ const sceTx = customJsonTx(
   },
   active('alice'),
 );
+// step 5: give a holder a real balance so the balance reads and WS routing have data
+const issueTx = customJsonTx(
+  {
+    contract: 'tokens',
+    action: 'issue',
+    params: { symbol: 'SCE', to: 'bob', quantity: '1000' },
+  },
+  active('alice'),
+);
 const listTx = customJsonTx(
   { action: 'placeOrder', params: { symbol: 'RAID', id: '1', price: '12.345' } },
   active('carol'),
@@ -145,6 +154,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
   let rpc: MockRpc;
   let star: TestClient;
   let carol: TestClient;
+  let tokenWatcher: TestClient;
   let base: string;
   let wsUrl: string;
 
@@ -153,7 +163,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     rpc.mine({ transactions: [createTx] });
     rpc.mine({ transactions: [mintBobTx] });
     rpc.mine({ transactions: [transferTx] });
-    rpc.mine({ transactions: [sceTx, listTx] });
+    rpc.mine({ transactions: [sceTx, issueTx, listTx] });
 
     store = new MemoryStore();
     sandbox = await createSandbox({ provider: 'node-vm', timeoutMs: 1000, memoryLimitMb: 128 });
@@ -187,6 +197,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     // Subscribe *before* ingestion so the notifications are observed as they commit.
     star = await TestClient.connect(wsUrl, ['*']);
     carol = await TestClient.connect(wsUrl, ['account:carol']);
+    tokenWatcher = await TestClient.connect(wsUrl, ['token:SCE']);
 
     await indexer.catchUp();
   });
@@ -194,6 +205,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
   afterAll(async () => {
     await star?.close();
     await carol?.close();
+    await tokenWatcher?.close();
     await api?.close();
     await sandbox?.dispose();
     await store?.close();
@@ -258,12 +270,50 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     });
 
     const logs = await getJson(`${base}/api/v1/logs?actor=alice`);
-    // alice created the RAID collection and the SCE price token
-    expect(logs.data).toHaveLength(2);
-    expect(logs.data[0]).toMatchObject({ action: 'create', status: 'APPLIED' });
+    // alice created the RAID collection, created the SCE price token and issued the
+    // test supply — every row is an applied op, two of them collection/token creates
+    expect(logs.data).toHaveLength(3);
+    expect(logs.data.every((l: { status: string }) => l.status === 'APPLIED')).toBe(true);
+    expect(logs.data.filter((l: { action: string }) => l.action === 'create')).toHaveLength(2);
+    expect(logs.data.some((l: { action: string }) => l.action === 'issue')).toBe(true);
 
     const block = await getJson(`${base}/api/v1/blocks/2`);
     expect(block.data).toMatchObject({ height: 2, txCount: 1 });
+  });
+
+  it('reads fungible tokens, balances and params over REST', async () => {
+    const tokens = await getJson(`${base}/api/v1/tokens`);
+    expect(tokens.data).toHaveLength(1);
+    expect(tokens.data[0]).toMatchObject({
+      symbol: 'SCE',
+      name: 'Smart Contract Engine',
+      precision: 3,
+      maxSupply: '0', // 0 = unlimited
+      supply: '1000',
+      issuer: 'alice',
+    });
+
+    const token = await getJson(`${base}/api/v1/tokens/SCE`);
+    expect(token.data).toMatchObject({ symbol: 'SCE', metadata: '' });
+
+    const unknown = await fetch(`${base}/api/v1/tokens/NOPE`);
+    expect(unknown.status).toBe(404);
+
+    const balances = await getJson(`${base}/api/v1/balances?account=bob`);
+    expect(balances.data).toHaveLength(1);
+    expect(balances.data[0]).toMatchObject({ account: 'bob', symbol: 'SCE', quantity: '1000' });
+    expect(balances.meta.total).toBe(1);
+
+    const filtered = await getJson(`${base}/api/v1/balances?account=bob&symbol=RAID`);
+    expect(filtered.data).toHaveLength(0);
+
+    const params = await getJson(`${base}/api/v1/params`);
+    expect(params.data).toMatchObject({
+      admin: 'steempro.com',
+      treasury: 'steempro.com',
+      feeTokens: ['SCE'],
+      fees: { tokenCreationFee: '0', fillOrderFeeBps: '0' },
+    });
   });
 
   it('rejects bad input and unknown routes with JSON errors', async () => {
@@ -276,6 +326,11 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
 
     const badLimit = await fetch(`${base}/api/v1/collections?limit=0`);
     expect(badLimit.status).toBe(400);
+
+    // balances is account-scoped by design — no global dump
+    const noAccount = await fetch(`${base}/api/v1/balances`);
+    expect(noAccount.status).toBe(400);
+    expect(await noAccount.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
 
     const noRoute = await fetch(`${base}/api/v1/nope`);
     expect(noRoute.status).toBe(404);
@@ -344,6 +399,57 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     });
   });
 
+  it('answers fungible token queries over GraphQL', async () => {
+    const query = /* GraphQL */ `
+      {
+        tokens(issuer: "alice") {
+          symbol
+          precision
+          supply
+          maxSupply
+          issuer
+        }
+        token(symbol: "SCE") {
+          name
+          metadata
+        }
+        balances(account: "bob") {
+          account
+          symbol
+          quantity
+        }
+        params {
+          admin
+          treasury
+          fees {
+            tokenCreationFee
+            fillOrderFeeBps
+          }
+          feeTokens
+        }
+      }
+    `;
+    const response = await fetch(`${base}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { data?: Record<string, unknown>; errors?: unknown[] };
+    expect(body.errors).toBeUndefined();
+    expect(body.data).toMatchObject({
+      tokens: [{ symbol: 'SCE', precision: 3, supply: '1000', maxSupply: '0', issuer: 'alice' }],
+      token: { name: 'Smart Contract Engine', metadata: '' },
+      balances: [{ account: 'bob', symbol: 'SCE', quantity: '1000' }],
+      params: {
+        admin: 'steempro.com',
+        treasury: 'steempro.com',
+        fees: { tokenCreationFee: '0', fillOrderFeeBps: '0' },
+        feeTokens: ['SCE'],
+      },
+    });
+  });
+
   it('streams committed events to wildcard subscribers', async () => {
     await waitFor(() => star.events('BLOCK_APPLIED').length >= 4, 'block events');
     expect(star.events('NFT_MINTED')).toHaveLength(1);
@@ -365,6 +471,27 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     // Wildcard-only events must not leak to a narrow subscription.
     expect(types).not.toContain('BLOCK_APPLIED');
     expect(types.every((t) => t !== 'BLOCK_APPLIED' && t !== 'REORG_DETECTED')).toBe(true);
+  });
+
+  it('routes fungible token events to the token lane and balance changes per holder', async () => {
+    await waitFor(() => tokenWatcher.events('BALANCE_CHANGED').length > 0, 'token lane events');
+    const types = tokenWatcher.events().map((e) => e.type as string);
+    expect(types).toContain('TOKEN_CREATED');
+    expect(types).toContain('TOKEN_ISSUED');
+    expect(types).toContain('BALANCE_CHANGED');
+    // NFT collection and marketplace activity must not leak into the token lane
+    expect(types).not.toContain('NFT_MINTED');
+    expect(types).not.toContain('ORDER_PLACED');
+
+    const changed = tokenWatcher.events('BALANCE_CHANGED')[0];
+    expect(changed).toMatchObject({
+      account: 'bob',
+      symbol: 'SCE',
+      data: { previous: '0', balance: '1000', action: 'issue' },
+    });
+
+    // wildcard subscribers observe the same synthesized balance event
+    await waitFor(() => star.events('BALANCE_CHANGED').length > 0, 'star balance events');
   });
 
   it('validates subscriptions and answers pings', async () => {
