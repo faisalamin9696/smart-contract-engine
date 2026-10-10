@@ -43,6 +43,7 @@ consensus validates signatures against. The JSON payload's own account fields ar
 | transfers / burns / `placeOrder` | active of the current owner/holder (derived from signed auths) |
 | `fillOrder` | active; buyer is the first active signer that is not the seller |
 | `cancelOrder` | active of the seller |
+| market `buy`/`sell`/`cancel` | active of the signer — `buy`/`sell` move funds into escrow, `cancel` refunds **only** to the order owner (identity fields are immutable, terminal rows frozen) |
 | issuer management / property admin / `transferOwnership` / `updatePrecision` | active of the owner (`editCollection`/`editToken` check **before** any mutation or fee) |
 | `setProperties` | per-property `authorizedEditingAccounts` (posting sufficient by wiki rule) |
 | `updateUrl`/`updateMetadata` (and nft name-family) | owner with active **or** posting |
@@ -57,7 +58,8 @@ The sandbox returns *declarative mutations*; the host (`src/vm/guard.ts`,
 `src/state/stateTxn.ts`) independently re-checks schemas, entity allowlists per
 contract, immutable fields, read-set integrity, supply/burn invariants, order finality,
 and the **ledger conservation invariant** (per op, balance deltas per symbol must equal
-that symbol's supply delta). A compromised or buggy guest cannot write a row the guard
+that symbol's supply delta — with the fungible market, book-order escrow counted as a
+balance-equivalent of the side's token, so placement/fills/cancels also net to zero). A compromised or buggy guest cannot write a row the guard
 rejects, and a failed op never aborts the block.
 
 ### 4. Determinism
@@ -123,7 +125,8 @@ The state of any two honest nodes at the same cursor height is byte-identical by
 construction; the engine makes that checkable:
 
 * `GET /api/v1/state-checksum` — deterministic per-entity SHA-256 fingerprints of the
-  whole ledger (collections, instances, tokens, balances, orders, param, `order_seq`).
+  whole ledger (collections, instances, tokens, balances, orders, bookOrders, param,
+  `order_seq`, `market_order_seq`).
   Compare against a reference node at the **same height**; `entities` pinpoints which
   table diverged.
 * The Postgres parity suite runs the same assertions against `MemoryStore` and

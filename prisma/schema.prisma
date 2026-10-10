@@ -230,8 +230,42 @@ model ParamRecord {
   /// Fee destination account
   treasury String
   /// Fee schedule: nftCreationFee/addPropertyFee/tokenCreationFee/issueFee (decimal
-  /// strings) + fillOrderFeeBps (uint string). Seeded all-zero by migration 0003.
+  /// strings) + fillOrderFeeBps/tradeFeeBps (uint strings). Seeded all-zero by
+  /// migration 0003; tradeFeeBps is optional (pre-market rows lack it — absence = 0).
   fees     Json
   /// Tokens accepted for fee payment (e.g. ["SCE"])
   feeTokens String[]
+}
+
+/// Fungible market book order (docs/MARKET-DESIGN.md — `marketOrder` entity).
+/// Not to be confused with MarketOrderRecord (an NFT marketplace listing).
+model BookOrderRecord {
+  /// Order id ("MKT-00000001") — allocated from the `market_order_seq` meta counter
+  id               String  @id
+  /// Order owner: the only account that may cancel it
+  account          String
+  /// BUY | SELL
+  side             String
+  /// Base token being traded
+  symbol           String
+  /// Quote/settlement token (escrow denomination for BUY orders)
+  quote            String
+  /// Remaining base quantity (decimal string, honours the base precision)
+  quantity         String
+  /// Cumulative base quantity filled so far
+  filled           String
+  /// Limit price: quote units per base unit (decimal, <= quote precision)
+  price            String
+  /// Remaining escrow: quote units (BUY) or base units (SELL) — counted as a
+  /// balance-equivalent by the guard's conservation invariant
+  escrow           String
+  /// OPEN | FILLED | CANCELLED
+  status           String
+  createdAtBlock   Int
+  updatedAtBlock   Int
+  filledAtBlock    Int?
+
+  @@index([status])
+  @@index([symbol, quote])
+  @@index([account])
 }

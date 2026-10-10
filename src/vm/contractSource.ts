@@ -68,7 +68,7 @@ export const CONTRACT_SOURCE = `
   // ---- fee engine (docs/TOKENS-DESIGN.md step 3) --------------------------
   var PARAM_KEY = 'param';   // key of the single fee-schedule row (entity "param")
   var FEE_SYMBOL = 'SCE';    // canonical fee unit for actions without a feeSymbol param
-  var FEE_KEYS = ['nftCreationFee', 'addPropertyFee', 'tokenCreationFee', 'issueFee', 'fillOrderFeeBps'];
+  var FEE_KEYS = ['nftCreationFee', 'addPropertyFee', 'tokenCreationFee', 'issueFee', 'fillOrderFeeBps', 'tradeFeeBps'];
 
   var PROPERTY_TYPES = ['number', 'string', 'boolean'];
 
@@ -1563,6 +1563,10 @@ export const CONTRACT_SOURCE = `
           if (typeof value !== 'string' || !RE_UINT.test(value) || intGt(value, '10000')) {
             fail('BAD_FEE', 'fillOrderFeeBps must be an unsigned integer at most 10000');
           }
+        } else if (key === 'tradeFeeBps') {
+          if (typeof value !== 'string' || !RE_UINT.test(value) || intGt(value, '10000')) {
+            fail('BAD_FEE', 'tradeFeeBps must be an unsigned integer at most 10000');
+          }
         } else if (typeof value !== 'string' || !RE_DECIMAL.test(value)) {
           fail('BAD_FEE', 'fee ' + key + ' must be a non-negative decimal string');
         }
@@ -1588,6 +1592,331 @@ export const CONTRACT_SOURCE = `
     emit(E, 'PARAM_UPDATED', ctx, {
       account: param.admin,
       data: { fees: updated.fees, feeTokens: updated.feeTokens },
+    });
+    return updated;
+  }
+
+  // ------------------------------------------------------------- market contract
+  // Fungible order book (docs/MARKET-DESIGN.md; wiki steemsmartcontracts "market"):
+  // buy / sell / cancel with escrow held ON the order row and deterministic
+  // price-time matching inside the VM. The book for the traded pair is prefetched
+  // into the snapshot (state/snapshot.ts), so every crossing order is visible; the
+  // matcher re-sorts explicitly (best price, then oldest id) and never relies on
+  // object iteration order.
+  //
+  // Escrow model: a BUY order's escrow is quote units (ceil of quantity x price,
+  // so per-fill flooring can never outrun it); a SELL order's escrow is base units
+  // (exactly its quantity). A fill releases escrow from BOTH orders: quote from the
+  // BUY (at the resting order's price — maker priority), base from the SELL. When a
+  // BUY order completes, any rounding dust left in its escrow is refunded to its
+  // owner. Cancelling refunds whatever escrow remains.
+
+  var MAX_BOOK_OPEN_PER_ACCOUNT = 100; // resting orders per account (anti-spam)
+  var MAX_FILLS_PER_OP = 25;           // matcher stops early; the rest stays on the book
+  var BPS_DIVISOR = 10000;
+  var OPEN_COUNT_KEY_PREFIX = 'open:'; // synthetic snapshot key (see openOrdersMetaKey)
+
+  function nextMarketOrderId(S, M) {
+    var current = read(S, 'meta', 'market_order_seq');
+    var next = current === null ? '1' : intAdd(current, '1');
+    write(S, M, 'meta', 'market_order_seq', next);
+    return 'MKT-' + pad(toInt(next), 8);
+  }
+
+  /** Both tokens of a trading pair, validated (shape + existence). */
+  function loadMarketPair(S, p) {
+    if (typeof p.symbol !== 'string' || !RE_SYMBOL.test(p.symbol)) {
+      fail('BAD_SYMBOL', 'symbol must be 3 to 10 uppercase letters');
+    }
+    if (typeof p.quote !== 'string' || !RE_SYMBOL.test(p.quote)) {
+      fail('BAD_QUOTE', 'quote must be 3 to 10 uppercase letters');
+    }
+    if (p.symbol === p.quote) fail('SAME_TOKEN', 'symbol and quote must differ');
+    return { base: loadToken(S, p.symbol), quoteToken: loadToken(S, p.quote) };
+  }
+
+  /** Limit price: decimal string, > 0, fractional digits <= the quote precision. */
+  function validateMarketPrice(quoteToken, value) {
+    if (typeof value !== 'string' || !RE_DECIMAL.test(value)) {
+      fail('BAD_PRICE', 'price must be a decimal string with at most 8 fractional digits');
+    }
+    var amount = new BigNumber(value);
+    if (!amount.gt(0)) fail('BAD_PRICE', 'price must be greater than zero');
+    if (amount.decimalPlaces() > quoteToken.precision) {
+      fail(
+        'PRECISION_EXCEEDED',
+        'price decimals exceed precision ' + quoteToken.precision + ' of ' + quoteToken.symbol
+      );
+    }
+    return value;
+  }
+
+  /** ceil to "places" decimals — escrow coverage must round UP. */
+  function decCeilPlaces(value, places) {
+    return new BigNumber(value).toFixed(places, BigNumber.ROUND_UP);
+  }
+
+  /** floor to "places" decimals — per-fill costs and fees round DOWN (never overcharge). */
+  function decFloorPlaces(value, places) {
+    return new BigNumber(value).toFixed(places, BigNumber.ROUND_DOWN);
+  }
+
+  /** Canonical decimal string (no trailing zeros) — stored values and event payloads. */
+  function decNorm(value) {
+    return new BigNumber(value).toFixed();
+  }
+
+  /** Accumulates a signed decimal amount into a per-symbol delta map (BigNumber values). */
+  function addDelta(deltas, account, amount) {
+    var value = new BigNumber(amount);
+    if (value.isZero()) return;
+    var current = deltas[account] === undefined ? new BigNumber(0) : deltas[account];
+    deltas[account] = current.plus(value);
+  }
+
+  /** Current trade fee (optional "tradeFeeBps" key on the param row — absence = "0"). */
+  function loadTradeFee(S) {
+    var param = read(S, 'param', PARAM_KEY);
+    if (param === null) fail('PARAM_NOT_FOUND', 'fee parameter row is missing');
+    var bps = '0';
+    if (param.fees !== null && param.fees !== undefined && typeof param.fees.tradeFeeBps === 'string') {
+      bps = param.fees.tradeFeeBps;
+    }
+    if (!RE_UINT.test(bps) || intGt(bps, String(BPS_DIVISOR))) {
+      fail('BAD_FEE', 'tradeFeeBps must be an unsigned integer at most ' + BPS_DIVISOR);
+    }
+    return { bps: bps, treasury: param.treasury };
+  }
+
+  /** Treasury cut of a fill's quote cost, floored to the quote precision. */
+  function tradeFeeOf(cost, feeInfo, quotePrecision) {
+    if (feeInfo.bps === '0') return decFloorPlaces('0', quotePrecision);
+    return decFloorPlaces(new BigNumber(cost).times(feeInfo.bps).div(BPS_DIVISOR), quotePrecision);
+  }
+
+  /**
+   * Applies one fill between a BUY and a SELL order at execPrice (the resting
+   * order's price — maker priority) and returns both updated rows.
+   *
+   * Escrow legs: the BUY releases "cost" quote units, the SELL releases fillQty
+   * base units. Balance legs accumulate into the per-op delta maps: buyer +base,
+   * seller +(cost - fee) quote, treasury +fee quote — net zero per symbol, so the
+   * guard's conservation invariant holds for every fill.
+   */
+  function applyFill(ctx, S, M, E, buy, sell, fillQty, execPrice, quoteToken, feeInfo, deltas) {
+    var cost = decNorm(decFloorPlaces(new BigNumber(fillQty).times(execPrice), quoteToken.precision));
+    var fee = decNorm(tradeFeeOf(cost, feeInfo, quoteToken.precision));
+
+    var buyAfter = copy(buy);
+    buyAfter.quantity = decSub(buy.quantity, fillQty);
+    buyAfter.filled = decAdd(buy.filled, fillQty);
+    buyAfter.escrow = decSub(buy.escrow, cost);
+    buyAfter.updatedAtBlock = ctx.blockHeight;
+    if (!new BigNumber(buyAfter.quantity).gt(0)) {
+      buyAfter.status = 'FILLED';
+      buyAfter.filledAtBlock = ctx.blockHeight;
+      if (new BigNumber(buyAfter.escrow).gt(0)) {
+        // Rounding dust (costs are floored per fill) goes back to the buyer.
+        addDelta(deltas.quote, buy.account, buyAfter.escrow);
+        buyAfter.escrow = '0';
+      }
+    }
+    write(S, M, 'marketOrder', buy.id, buyAfter);
+
+    var sellAfter = copy(sell);
+    sellAfter.quantity = decSub(sell.quantity, fillQty);
+    sellAfter.filled = decAdd(sell.filled, fillQty);
+    // SELL escrow is base units: it releases exactly the filled quantity.
+    sellAfter.escrow = decSub(sellAfter.escrow, fillQty);
+    sellAfter.updatedAtBlock = ctx.blockHeight;
+    if (!new BigNumber(sellAfter.quantity).gt(0)) {
+      sellAfter.status = 'FILLED';
+      sellAfter.filledAtBlock = ctx.blockHeight;
+      if (new BigNumber(sellAfter.escrow).gt(0)) {
+        addDelta(deltas.symbol, sell.account, sellAfter.escrow);
+        sellAfter.escrow = '0';
+      }
+    }
+    write(S, M, 'marketOrder', sell.id, sellAfter);
+
+    addDelta(deltas.symbol, buy.account, fillQty);
+    addDelta(deltas.quote, sell.account, decSub(cost, fee));
+    addDelta(deltas.quote, feeInfo.treasury, fee);
+
+    emit(E, 'MARKET_FILLED', ctx, {
+      account: buy.account,
+      symbol: buy.symbol,
+      price: execPrice,
+      data: {
+        buyOrderId: buy.id,
+        sellOrderId: sell.id,
+        buyer: buy.account,
+        seller: sell.account,
+        quote: buy.quote,
+        quantity: fillQty,
+        cost: cost,
+        fee: fee,
+      },
+    });
+    return { buy: buyAfter, sell: sellAfter };
+  }
+
+  /** Shared placement flow for market.buy / market.sell. */
+  function placeMarketOrder(ctx, p, S, M, E, side) {
+    var actor = activeSender(ctx, side === 'BUY' ? 'buy' : 'sell');
+    var pair = loadMarketPair(S, p);
+    var base = pair.base;
+    var quoteToken = pair.quoteToken;
+    var quantity = validateQuantity(base, p.quantity);
+    var price = validateMarketPrice(quoteToken, p.price);
+
+    // Per-account cap: the current open count is fetched host-side and injected as a
+    // synthetic read-only meta key (state/snapshot.ts).
+    var openRaw = read(S, 'meta', OPEN_COUNT_KEY_PREFIX + actor);
+    var openCount = openRaw === null || openRaw === undefined ? '0' : openRaw;
+    if (!RE_UINT.test(openCount)) openCount = '0';
+    if (!intLt(openCount, String(MAX_BOOK_OPEN_PER_ACCOUNT))) {
+      fail(
+        'TOO_MANY_OPEN_ORDERS',
+        actor + ' already has ' + openCount + ' open orders (max ' + MAX_BOOK_OPEN_PER_ACCOUNT + ')'
+      );
+    }
+
+    var feeInfo = loadTradeFee(S);
+
+    // Escrow at placement (wiki: funds move on placement, not on fill).
+    var escrow =
+      side === 'BUY'
+        ? decNorm(decCeilPlaces(new BigNumber(quantity).times(price), quoteToken.precision))
+        : quantity;
+    var deltas = { symbol: {}, quote: {} };
+    if (side === 'BUY') addDelta(deltas.quote, actor, decSub('0', escrow));
+    else addDelta(deltas.symbol, actor, decSub('0', escrow));
+
+    var orderId = nextMarketOrderId(S, M);
+    var order = {
+      id: orderId,
+      account: actor,
+      side: side,
+      symbol: base.symbol,
+      quote: quoteToken.symbol,
+      quantity: quantity,
+      filled: '0',
+      price: price,
+      escrow: escrow,
+      status: 'OPEN',
+      createdAtBlock: ctx.blockHeight,
+      updatedAtBlock: ctx.blockHeight,
+      filledAtBlock: null,
+    };
+    write(S, M, 'marketOrder', orderId, order);
+
+    // ---- match against the crossing side of the book ------------------------
+    var makerSide = side === 'BUY' ? 'SELL' : 'BUY';
+    var candidates = [];
+    for (var key in S.marketOrder) {
+      if (!has(S.marketOrder, key)) continue;
+      var candidate = S.marketOrder[key];
+      if (candidate === null || candidate === undefined) continue;
+      if (candidate.status !== 'OPEN') continue;
+      if (candidate.side !== makerSide) continue;
+      if (candidate.symbol !== base.symbol || candidate.quote !== quoteToken.symbol) continue;
+      if (candidate.id === orderId) continue;
+      // The maker must cross our limit: at or better than our price.
+      if (side === 'BUY' && new BigNumber(candidate.price).gt(price)) continue;
+      if (side === 'SELL' && new BigNumber(candidate.price).lt(price)) continue;
+      candidates.push(candidate);
+    }
+    // Price-time priority: best price first, then the oldest order (id order).
+    candidates.sort(function (a, b) {
+      var pa = new BigNumber(a.price);
+      var pb = new BigNumber(b.price);
+      if (!pa.eq(pb)) return pa.lt(pb) ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+
+    var fills = 0;
+    var current = order;
+    for (var i = 0; i < candidates.length && fills < MAX_FILLS_PER_OP; i++) {
+      var maker = read(S, 'marketOrder', candidates[i].id);
+      if (maker === null || maker.status !== 'OPEN') continue;
+      if (!new BigNumber(current.quantity).gt(0)) break;
+      if (!new BigNumber(maker.quantity).gt(0)) continue;
+      var fillQty = new BigNumber(current.quantity).lt(maker.quantity)
+        ? current.quantity
+        : maker.quantity;
+      // Maker priority: the resting order's price executes the trade.
+      var result =
+        side === 'BUY'
+          ? applyFill(ctx, S, M, E, current, maker, fillQty, maker.price, quoteToken, feeInfo, deltas)
+          : applyFill(ctx, S, M, E, maker, current, fillQty, maker.price, quoteToken, feeInfo, deltas);
+      current = side === 'BUY' ? result.buy : result.sell;
+      fills++;
+    }
+
+    settleDeltas(S, M, base.symbol, deltas.symbol);
+    settleDeltas(S, M, quoteToken.symbol, deltas.quote);
+    ensureAccount(S, M, ctx, actor);
+
+    if (new BigNumber(current.quantity).gt(0)) {
+      emit(E, 'MARKET_PLACED', ctx, {
+        account: actor,
+        symbol: base.symbol,
+        data: {
+          orderId: current.id,
+          side: side,
+          quote: quoteToken.symbol,
+          quantity: current.quantity,
+          price: price,
+          escrow: current.escrow,
+        },
+      });
+    }
+    return current;
+  }
+
+  function mBuy(ctx, p, S, M, E) {
+    return placeMarketOrder(ctx, p, S, M, E, 'BUY');
+  }
+
+  function mSell(ctx, p, S, M, E) {
+    return placeMarketOrder(ctx, p, S, M, E, 'SELL');
+  }
+
+  /** market.cancel — owner-only; refunds the remaining escrow to the owner. */
+  function mCancel(ctx, p, S, M, E) {
+    var order = read(S, 'marketOrder', p.orderId);
+    if (order === null || order === undefined) {
+      fail('ORDER_NOT_FOUND', 'book order ' + String(p.orderId) + ' does not exist');
+    }
+    requireAuth(ctx, order.account, 'active', 'cancellation of ' + order.id);
+    if (order.status !== 'OPEN') {
+      fail('ORDER_NOT_OPEN', 'book order ' + order.id + ' is already ' + order.status);
+    }
+    var refund = order.escrow;
+    var updated = copy(order);
+    updated.status = 'CANCELLED';
+    updated.escrow = '0';
+    updated.quantity = '0';
+    updated.updatedAtBlock = ctx.blockHeight;
+    write(S, M, 'marketOrder', order.id, updated);
+
+    if (new BigNumber(refund).gt(0)) {
+      var deltas = {};
+      addDelta(deltas, order.account, refund);
+      settleDeltas(S, M, order.side === 'BUY' ? order.quote : order.symbol, deltas);
+    }
+
+    emit(E, 'MARKET_CANCELLED', ctx, {
+      account: order.account,
+      symbol: order.symbol,
+      data: {
+        orderId: order.id,
+        side: order.side,
+        quote: order.quote,
+        refunded: refund,
+        filled: order.filled,
+      },
     });
     return updated;
   }
@@ -1634,6 +1963,11 @@ export const CONTRACT_SOURCE = `
     },
     engine: {
       setParam: hSetParam,
+    },
+    market: {
+      buy: mBuy,
+      sell: mSell,
+      cancel: mCancel,
     },
   };
 

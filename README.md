@@ -48,7 +48,7 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 | State integrity | sandbox returns *declarative mutations*; the host re-validates schema, entity allowlist (per contract), immutable fields, read-set integrity (unread-write / stale-read guards), supply/burn/groupBy invariants, fungible token invariants + the ledger **conservation invariant** (balance deltas must equal the supply delta per op), typed property rules and order finality (`src/vm/guard.ts`) |
 | Atomicity | one DB transaction per block: state + journal + logs + cursor commit together; advisory lock (`pg_advisory_xact_lock`) serialises block processing across replicas |
 | APIs | REST + GraphQL (Apollo Server 5) + WebSocket channels |
-| Tests | 185 tests across 19 suites (deterministic execution, wiki action semantics for all contracts, the fee engine, marketplace settlement, guards, journal, parser, **RPC quorum verification, state-checksum fingerprints, rate limiting**) + integration suites for micro-fork rollbacks, the API surface, and the Postgres parity suite (incl. **cross-backend checksum equality**) |
+| Tests | 220+ tests across 22 suites (deterministic execution, wiki action semantics for all contracts, the fee engine, marketplace settlement, the fungible market book, guards, journal, parser, **RPC quorum verification, state-checksum fingerprints, rate limiting**) + integration suites for micro-fork rollbacks, the API surface, and the Postgres parity suite (incl. **cross-backend checksum equality**) |
 
 ## Quick start
 
@@ -126,7 +126,9 @@ curl localhost:4000/health
 | `/collections/:symbol` · `/collections/:symbol/instances` | collection detail / inventory |
 | `/instances?owner&symbol&limit&offset` · `/instances/:id` · `/instances/:symbol/:id` | filtered inventory |
 | `/accounts/:name` · `/accounts/:name/instances` | account profile + inventory |
-| `/orders?status&symbol&seller&limit&offset` · `/orders/:id` | marketplace book |
+| `/orders?status&symbol&seller&limit&offset` · `/orders/:id` | NFT marketplace orders |
+| `/market/orders?symbol&quote&side&status&account&limit&offset` · `/market/orders/:id` | fungible market book (`market` contract) |
+| `/market/book?symbol&quote` · `/market/trades?symbol&quote&limit&offset` | aggregated depth (bids/asks) / recent fills |
 | `/tokens?issuer&limit&offset` · `/tokens/:symbol` | fungible tokens (wiki `tokens` contract) |
 | `/balances?account&symbol&limit&offset` | token balances for one account (`account` required) |
 | `/params` | admin, treasury and the in-state fee schedule |
@@ -138,6 +140,7 @@ curl localhost:4000/health
 curl 'localhost:4000/api/v1/instances?owner=alice&limit=10'
 curl 'localhost:4000/api/v1/instances/DRAGON:573'   # or: /instances/DRAGON/573
 curl 'localhost:4000/api/v1/orders?status=OPEN'
+curl 'localhost:4000/api/v1/market/book?symbol=SCE&quote=WSTEEM'
 curl 'localhost:4000/api/v1/logs?status=FAILED'
 ```
 
@@ -166,6 +169,14 @@ Errors are JSON: `{"error":{"code":"NOT_FOUND","message":"instance not found"}}`
     instance { id owner }
     settlement { royalty fee sellerProceeds buyer }
   }
+  bookOrders(status: OPEN, symbol: "SCE", quote: "WSTEEM") {
+    id account side quantity price escrow
+  }
+  book(symbol: "SCE", quote: "WSTEEM") {
+    bids { price quantity orders }
+    asks { price quantity orders }
+  }
+  trades(symbol: "SCE", limit: 10) { buyer seller quantity price cost fee }
   logs(actor: "alice", limit: 5) { action status error }
   status { running cursorHeight sandbox storage stats { blocksApplied reorgs } }
 }
@@ -189,10 +200,11 @@ Custom `JSON` scalar refuses floating-point literals (the engine never produces 
 ```
 
 Channels: `*` (everything), `account:<name>`, `collection:<SYMBOL>`, `token:<SYMBOL>`,
-`market`, `chain`. `TOKEN_*` and `BALANCE_CHANGED` events go to `token:<SYMBOL>` +
-`account:<name>` (never to the NFT `collection:`/`market` lanes); `BALANCE_CHANGED`
-fires once per holder whose balance row moved — transfers, issues, burns, fee debits
-and settlement legs.
+`market`, `chain`. `TOKEN_*`, `BALANCE_CHANGED` and `MARKET_*` events go to
+`token:<SYMBOL>` + `account:<name>` (never to the NFT `collection:` lane; `MARKET_*`
+additionally goes to `market`); `BALANCE_CHANGED`
+fires once per holder whose balance row moved — transfers, issues, burns, fee debits,
+market escrow and settlement legs.
 Invalid channel names, oversized frames and more than 100 subscriptions per socket are
 rejected with `{"type":"error","message":...}`.
 
@@ -200,16 +212,19 @@ Event types: `BLOCK_APPLIED`, `COLLECTION_CREATED`, `NFT_MINTED`, `NFT_RECEIVED`
 `NFT_TRANSFERRED`, `PROPERTIES_UPDATED`, `NFT_BURNED`, `ORDER_PLACED`, `ORDER_FILLED`,
 `ORDER_CANCELLED`, `TOKEN_CREATED`, `TOKEN_ISSUED`, `TOKEN_TRANSFERRED`,
 `TOKEN_BURNED`, `TOKEN_UPDATED`, `BALANCE_CHANGED`, `PARAM_UPDATED`, `ITEM_FAILED`,
+`MARKET_PLACED`, `MARKET_FILLED`, `MARKET_CANCELLED`,
 `TX_FAILED`, `REORG_DETECTED`, `REORG_APPLIED`, `ENGINE_HALTED`.
 
 ## Writing to the engine
 
-Three namespaces share this engine's op id (the same multiplexing pattern as the real
+Four namespaces share this engine's op id (the same multiplexing pattern as the real
 Steem Engine): the standard **`nft`** contract
 ([NFT-Contracts wiki](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/NFT-Contracts.md)),
 the fungible **`tokens`** contract
 ([Tokens-Contract wiki](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md),
-v1 scope of [docs/TOKENS-DESIGN.md](docs/TOKENS-DESIGN.md)), and the **`engine`**
+v1 scope of [docs/TOKENS-DESIGN.md](docs/TOKENS-DESIGN.md)), the **`market`**
+fungible order book (wiki-compatible `buy`/`sell`/`cancel`, see
+[docs/MARKET-DESIGN.md](docs/MARKET-DESIGN.md)), and the **`engine`**
 admin namespace (fee-schedule meta-actions, currently `setParam`).
 Every action is a Steem `custom_json` operation with `id = sce-mainnet1`, accepted in
 either envelope shape:
@@ -218,7 +233,7 @@ either envelope shape:
 // engine shorthand (contract optional — defaults to "nft")
 {"action": "issue", "params": {"symbol": "DRAGON", "to": "bob"}}
 
-// standard steemsmartcontracts envelope (contractName "nft", "tokens" or "engine")
+// standard steemsmartcontracts envelope (contractName "nft", "tokens", "market" or "engine")
 {"contractName": "nft", "contractAction": "issue",
  "contractPayload": {"symbol": "DRAGON", "to": "bob"}}
 
@@ -262,6 +277,24 @@ Amounts are decimal strings, supplies and prices are strings; **no floats anywhe
 | `transferOwnership` | `symbol, to` | active of the `issuer` |
 | `updatePrecision` | `symbol, precision` — increase only | active of the `issuer` |
 
+### `market` contract (fungible order book)
+
+| Action | Params | Authority |
+| --- | --- | --- |
+| `buy` | `symbol, quote, quantity, price` — escrows `ceil(quantity × price)` of `quote`, matches immediately against crossing SELL orders (maker priority — the resting order's price executes; any escrow improvement is refunded), the remainder rests on the book | **active** of the buyer |
+| `sell` | `symbol, quote, quantity, price` — escrows `quantity` of `symbol`, matches against crossing BUY orders symmetrically | **active** of the seller |
+| `cancel` | `orderId` — refunds the remaining escrow to the owner | **active** of the owner |
+
+Both tokens must exist and differ; quantity decimals are capped by the base token's
+precision, price decimals by the quote's. Matching is deterministic price-time
+priority (best price, then oldest order id — the matcher re-sorts explicitly, never
+object order); fills floor per-fill costs to quote precision and a completing BUY
+order returns its rounding dust. `tradeFeeBps` (genesis 0, `setParam`-raised) is cut
+from each fill's quote proceeds and credited to `param.treasury`. Guard rails: **100
+open orders per account** and **25 fills per op** (the rest stays on the book); book
+rows carry their own escrow, which the conservation invariant counts as a
+balance-equivalent of the side's token.
+
 Shared action names resolve per `contractName`; every op is additionally checked by the
 host guard, which enforces the **ledger conservation invariant**: within one op the sum
 of all balance deltas per symbol must equal that token's `supply` delta (transfers and
@@ -271,7 +304,7 @@ fees net to zero; only `issue`/`burn` change supply).
 
 | Action | Params | Authority |
 | --- | --- | --- |
-| `setParam` | `{fees?: {nftCreationFee?, addPropertyFee?, tokenCreationFee?, issueFee?, fillOrderFeeBps? (≤10000)}, feeTokens?: [SYMBOL,…] (≤10)}` — partial patch; at least one of the two keys required | active of `param.admin` (`steempro.com`) |
+| `setParam` | `{fees?: {nftCreationFee?, addPropertyFee?, tokenCreationFee?, issueFee?, fillOrderFeeBps? (≤10000), tradeFeeBps? (≤10000)}, feeTokens?: [SYMBOL,…] (≤10)}` — partial patch; at least one of the two keys required | active of `param.admin` (`steempro.com`) |
 
 Fee schedule lives in the single `param` row of state (deterministic, re-org safe) and
 starts at **0 for everything** — migration `0003` seeds the zero-fee bootstrap because
@@ -309,8 +342,10 @@ Rules worth knowing:
 
 Not implemented (per the wiki's optional sections and
 [docs/TOKENS-DESIGN.md](docs/TOKENS-DESIGN.md) deferrals): delegation / staking,
-`transferToContract`, and locked tokens. The marketplace actions above are an engine
-extension — upstream they live in a separate `market` contract.
+`transferToContract`, and locked tokens. The NFT marketplace actions
+(`placeOrder`/`fillOrder`/`cancelOrder`) are an engine extension on the `nft`
+contract — the wiki's separate fungible `market` contract is implemented in its own
+right (see above).
 
 ## Determinism contract
 

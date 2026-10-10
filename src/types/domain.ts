@@ -11,6 +11,7 @@ export type EntityKind =
   | 'instance'
   | 'account'
   | 'order'
+  | 'marketOrder'
   | 'token'
   | 'balance'
   | 'param'
@@ -21,6 +22,7 @@ export interface EntityValueMap {
   instance: Instance;
   account: Account;
   order: MarketOrder;
+  marketOrder: BookOrder;
   token: Token;
   balance: Balance;
   param: Param;
@@ -157,6 +159,13 @@ export type FeeSchedule = {
   issueFee: string;
   /** `fillOrder` treasury cut in basis points — target 200 (2%). */
   fillOrderFeeBps: string;
+  /**
+   * `market` trade fee in basis points, taken from the quote proceeds of every fill
+   * and credited to `param.treasury` (docs/MARKET-DESIGN.md). Optional: param rows
+   * written before the market contract existed (and their undo before-images) carry
+   * no such key — the VM and every host reader treat absence as "0".
+   */
+  tradeFeeBps?: string;
 }
 
 /** Fungible token definition — the `token` table (wiki `tokens` contract). */
@@ -220,6 +229,7 @@ export function genesisParam(): Param {
       tokenCreationFee: '0',
       issueFee: '0',
       fillOrderFeeBps: '0',
+      tradeFeeBps: '0',
     },
     feeTokens: ['SCE'],
   };
@@ -255,6 +265,43 @@ export type MarketOrder = {
   filledAtBlock: number | null;
   fillBy: string | null;
   settlement: Settlement | null;
+}
+
+export type BookOrderStatus = 'OPEN' | 'FILLED' | 'CANCELLED';
+
+/**
+ * One order on the fungible `market` book (docs/MARKET-DESIGN.md) — the `marketOrder`
+ * entity, keyed by id (`MKT-00000001`). Not to be confused with {@link MarketOrder},
+ * which is an NFT marketplace listing (per-instance, no escrow).
+ *
+ * Escrow lives *on the row*: `escrow` is the amount still held for this order — quote
+ * units for a BUY, base units for a SELL. The guard's conservation invariant counts
+ * `escrow` as a balance-equivalent of `side === 'BUY' ? quote : symbol`, so placement
+ * (balance -> escrow), fills (escrow -> counterparty balances + treasury) and cancels
+ * (escrow -> balance) all net to zero per op.
+ */
+export type BookOrder = {
+  id: string;
+  /** Order owner: the only account that may cancel it. */
+  account: string;
+  side: 'BUY' | 'SELL';
+  /** Base token being traded. */
+  symbol: string;
+  /** Quote token (the settlement currency; escrow denomination for BUY orders). */
+  quote: string;
+  /** Remaining base quantity (decimal string honouring the base precision). */
+  quantity: string;
+  /** Cumulative base quantity filled so far. */
+  filled: string;
+  /** Limit price: quote units per base unit (decimal, <= quote precision). */
+  price: string;
+  /** Remaining escrow: quote units (BUY) or base units (SELL). */
+  escrow: string;
+  status: BookOrderStatus;
+  createdAtBlock: number;
+  updatedAtBlock: number;
+  /** Block of the fill that completed the order (null while open / cancelled). */
+  filledAtBlock: number | null;
 }
 
 export interface BlockRecord {
@@ -303,6 +350,12 @@ export type EngineEventType =
   | 'ORDER_PLACED'
   | 'ORDER_FILLED'
   | 'ORDER_CANCELLED'
+  /** `market` contract: a fungible order rested on the book (possibly after fills). */
+  | 'MARKET_PLACED'
+  /** `market` contract: one fill between a BUY and a SELL order (both ids in data). */
+  | 'MARKET_FILLED'
+  /** `market` contract: an open book order was cancelled and its escrow refunded. */
+  | 'MARKET_CANCELLED'
   /** `tokens` contract: a fungible token was created. */
   | 'TOKEN_CREATED'
   /** `tokens` contract: supply increased and a holder was credited. */
@@ -352,6 +405,7 @@ export interface StateSnapshot {
   instance: Record<string, Instance | null>;
   account: Record<string, Account | null>;
   order: Record<string, MarketOrder | null>;
+  marketOrder: Record<string, BookOrder | null>;
   token: Record<string, Token | null>;
   balance: Record<string, Balance | null>;
   param: Record<string, Param | null>;
@@ -364,6 +418,7 @@ export function emptySnapshot(): StateSnapshot {
     instance: {},
     account: {},
     order: {},
+    marketOrder: {},
     token: {},
     balance: {},
     param: {},
@@ -516,6 +571,24 @@ export const MarketOrderSchema: z.ZodType<MarketOrder> = z
   })
   .strict() as unknown as z.ZodType<MarketOrder>;
 
+export const BookOrderSchema: z.ZodType<BookOrder> = z
+  .object({
+    id: z.string().min(3).max(64),
+    account: z.string().regex(ACCOUNT),
+    side: z.enum(['BUY', 'SELL']),
+    symbol: z.string().regex(SYMBOL),
+    quote: z.string().regex(SYMBOL),
+    quantity: z.string().regex(DECIMAL),
+    filled: z.string().regex(DECIMAL),
+    price: z.string().regex(DECIMAL),
+    escrow: z.string().regex(DECIMAL),
+    status: z.enum(['OPEN', 'FILLED', 'CANCELLED']),
+    createdAtBlock: z.number().int().nonnegative(),
+    updatedAtBlock: z.number().int().nonnegative(),
+    filledAtBlock: z.number().int().nonnegative().nullable(),
+  })
+  .strict() as unknown as z.ZodType<BookOrder>;
+
 export const TokenSchema: z.ZodType<Token> = z
   .object({
     symbol: z.string().regex(SYMBOL),
@@ -548,6 +621,13 @@ const FeeScheduleSchema: z.ZodType<FeeSchedule> = z
     fillOrderFeeBps: z.string().regex(UINT).refine((v) => Number(v) <= 10000, {
       message: 'fillOrderFeeBps must be <= 10000',
     }),
+    // Optional: param rows written before the market contract existed carry no such
+    // key (absence = "0" everywhere); strictness still rejects a malformed value.
+    tradeFeeBps: z
+      .string()
+      .regex(UINT)
+      .refine((v) => Number(v) <= 10000, { message: 'tradeFeeBps must be <= 10000' })
+      .optional(),
   })
   .strict() as unknown as z.ZodType<FeeSchedule>;
 
@@ -573,6 +653,8 @@ export function parseEntityValue(entity: EntityKind, value: unknown): EntityValu
       return AccountSchema.parse(value);
     case 'order':
       return MarketOrderSchema.parse(value);
+    case 'marketOrder':
+      return BookOrderSchema.parse(value);
     case 'token':
       return TokenSchema.parse(value);
     case 'balance':

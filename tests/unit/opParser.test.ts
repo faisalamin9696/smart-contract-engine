@@ -179,7 +179,7 @@ describe('custom_json block parser', () => {
       active('alice'),
     );
     const badContractField = customJsonTx(
-      { action: 'create', params: { symbol: 'SCE', name: 'x', precision: 3 }, contract: 'market' },
+      { action: 'create', params: { symbol: 'SCE', name: 'x', precision: 3 }, contract: 'defi' },
       active('alice'),
     );
 

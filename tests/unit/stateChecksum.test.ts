@@ -104,6 +104,7 @@ describe('computeStateChecksum', () => {
     expect(first.checksum).toMatch(/^[0-9a-f]{64}$/);
     expect(Object.keys(first.entities).sort()).toEqual([
       'balances',
+      'bookOrders',
       'collections',
       'instances',
       'meta',

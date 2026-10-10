@@ -47,18 +47,22 @@ export class EngineEventBus {
 export function channelsFor(event: EngineEvent): EventChannel[] {
   const channels: EventChannel[] = ['*'];
   if (event.account) channels.push(`account:${event.account}`);
-  const fungible = event.type.startsWith('TOKEN_') || event.type.startsWith('BALANCE_');
+  const fungible =
+    event.type.startsWith('TOKEN_') ||
+    event.type.startsWith('BALANCE_') ||
+    event.type.startsWith('MARKET_');
   if (event.symbol) {
     if (fungible) {
       // Fungible-token events stay on the token lane — a matching symbol string
-      // does not make them NFT collection or marketplace activity.
+      // does not make them NFT collection or marketplace activity. `MARKET_*`
+      // events name the traded *base token*, which is fungible.
       channels.push(`token:${event.symbol}`);
     } else {
       channels.push(`collection:${event.symbol}`);
       channels.push('market');
     }
   }
-  if (event.type.startsWith('ORDER_')) channels.push('market');
+  if (event.type.startsWith('ORDER_') || event.type.startsWith('MARKET_')) channels.push('market');
   if (event.type === 'BLOCK_APPLIED' || event.type.startsWith('REORG')) channels.push('chain');
   return [...new Set(channels)];
 }

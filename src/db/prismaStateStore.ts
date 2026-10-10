@@ -3,6 +3,7 @@ import type {
   AccountRecord as PrismaAccountRow,
   BalanceRecord as PrismaBalanceRow,
   BlockRecord as PrismaBlockRow,
+  BookOrderRecord as PrismaBookOrderRow,
   CollectionRecord as PrismaCollectionRow,
   InstanceRecord as PrismaInstanceRow,
   MarketOrderRecord as PrismaOrderRow,
@@ -15,6 +16,7 @@ import type {
   Account,
   Balance,
   BlockRecord,
+  BookOrder,
   Collection,
   EntityKind,
   Instance,
@@ -29,9 +31,11 @@ import type {
 } from '../types/domain';
 import type {
   BalanceFilter,
+  BookOrderFilter,
   CountQuery,
   EngineStore,
   ListBalancesQuery,
+  ListBookOrdersQuery,
   ListInstancesQuery,
   ListLogsQuery,
   ListOrdersQuery,
@@ -215,6 +219,42 @@ function orderFromRow(r: PrismaOrderRow): MarketOrder {
   };
 }
 
+function bookOrderToRow(o: BookOrder) {
+  return {
+    id: o.id,
+    account: o.account,
+    side: o.side,
+    symbol: o.symbol,
+    quote: o.quote,
+    quantity: o.quantity,
+    filled: o.filled,
+    price: o.price,
+    escrow: o.escrow,
+    status: o.status,
+    createdAtBlock: o.createdAtBlock,
+    updatedAtBlock: o.updatedAtBlock,
+    filledAtBlock: o.filledAtBlock,
+  };
+}
+
+function bookOrderFromRow(r: PrismaBookOrderRow): BookOrder {
+  return {
+    id: r.id,
+    account: r.account,
+    side: r.side as BookOrder['side'],
+    symbol: r.symbol,
+    quote: r.quote,
+    quantity: r.quantity,
+    filled: r.filled,
+    price: r.price,
+    escrow: r.escrow,
+    status: r.status as BookOrder['status'],
+    createdAtBlock: r.createdAtBlock,
+    updatedAtBlock: r.updatedAtBlock,
+    filledAtBlock: r.filledAtBlock,
+  };
+}
+
 function tokenToRow(t: Token) {
   return {
     symbol: t.symbol,
@@ -372,6 +412,10 @@ export class PrismaStateStore implements EngineStore {
         const r = await c.marketOrderRecord.findUnique({ where: { id: key } });
         return r ? (orderFromRow(r) as JsonValue) : null;
       }
+      case 'marketOrder': {
+        const r = await c.bookOrderRecord.findUnique({ where: { id: key } });
+        return r ? (bookOrderFromRow(r) as JsonValue) : null;
+      }
       case 'token': {
         const r = await c.tokenRecord.findUnique({ where: { symbol: key } });
         return r ? (tokenFromRow(r) as JsonValue) : null;
@@ -412,6 +456,11 @@ export class PrismaStateStore implements EngineStore {
       case 'order': {
         const data = orderToRow(value as unknown as MarketOrder);
         await c.marketOrderRecord.upsert({ where: { id: key }, create: data, update: data });
+        return;
+      }
+      case 'marketOrder': {
+        const data = bookOrderToRow(value as unknown as BookOrder);
+        await c.bookOrderRecord.upsert({ where: { id: key }, create: data, update: data });
         return;
       }
       case 'token': {
@@ -455,6 +504,9 @@ export class PrismaStateStore implements EngineStore {
         return;
       case 'order':
         await c.marketOrderRecord.deleteMany({ where: { id: key } });
+        return;
+      case 'marketOrder':
+        await c.bookOrderRecord.deleteMany({ where: { id: key } });
         return;
       case 'token':
         await c.tokenRecord.deleteMany({ where: { symbol: key } });
@@ -525,6 +577,34 @@ export class PrismaStateStore implements EngineStore {
     const where: Prisma.MarketOrderRecordWhereInput = {};
     if (q.symbol) where.symbol = q.symbol;
     return this.client.marketOrderRecord.count({ where });
+  }
+
+  async listBookOrders(q: ListBookOrdersQuery): Promise<BookOrder[]> {
+    const where: Prisma.BookOrderRecordWhereInput = {};
+    if (q.symbol) where.symbol = q.symbol;
+    if (q.quote) where.quote = q.quote;
+    if (q.account) where.account = q.account;
+    if (q.side) where.side = q.side;
+    if (q.status) where.status = q.status;
+    // Ids are zero-padded ("MKT-00000042"), so ascending id = allocation order —
+    // the deterministic order both the checksum and the in-VM matcher rely on.
+    const rows = await this.client.bookOrderRecord.findMany({
+      where,
+      orderBy: { id: 'asc' },
+      skip: q.offset,
+      take: q.limit,
+    });
+    return rows.map(bookOrderFromRow);
+  }
+
+  async countBookOrders(q: BookOrderFilter): Promise<number> {
+    const where: Prisma.BookOrderRecordWhereInput = {};
+    if (q.symbol) where.symbol = q.symbol;
+    if (q.quote) where.quote = q.quote;
+    if (q.account) where.account = q.account;
+    if (q.side) where.side = q.side;
+    if (q.status) where.status = q.status;
+    return this.client.bookOrderRecord.count({ where });
   }
 
   async listTokens(q: ListTokensQuery): Promise<Token[]> {

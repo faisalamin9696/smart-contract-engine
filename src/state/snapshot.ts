@@ -3,6 +3,24 @@ import type { ActionName, ContractName } from '../types/actions';
 import { PARAM_KEY, balanceKey, emptySnapshot, instanceKey, type Param, type StateSnapshot } from '../types/domain';
 import type { EngineStore } from './store';
 
+/**
+ * Safety valve on the prefetched book for one trading pair. Open orders are capped
+ * per account (100, enforced in-VM), so reaching this would take a coordinated book
+ * of thousands of orders — at which point failing loudly beats a silent partial view
+ * (the matcher must see every crossing order to be deterministic).
+ */
+const MAX_BOOK_PREFETCH = 10_000;
+
+/**
+ * Synthetic snapshot key carrying a signer's current open-order count (fetched with
+ * `countBookOrders`, never stored): the VM refuses to rest a new order above the
+ * per-account cap. Read-only — the contract never writes it, so it is not part of
+ * state and never enters the checksum.
+ */
+export function openOrdersMetaKey(account: string): string {
+  return `open:${account}`;
+}
+
 /** How one fee-bearing action resolves its payer and fee currency at routing time. */
 type FeeRoute = {
   /** Payer is the first active authority (`create`); otherwise the collection/token issuer. */
@@ -56,6 +74,7 @@ export async function buildSnapshot(
     instance: new Set<string>(),
     account: new Set<string>(),
     order: new Set<string>(),
+    marketOrder: new Set<string>(),
     token: new Set<string>(),
     balance: new Set<string>(),
     param: new Set<string>(),
@@ -71,10 +90,16 @@ export async function buildSnapshot(
   const isObject = (v: unknown): v is Record<string, unknown> =>
     typeof v === 'object' && v !== null && !Array.isArray(v);
 
+  // Synthetic read-only snapshot entries (fetched host-side, never stored): applied
+  // after the generic load loop, which would otherwise overwrite them with a null
+  // store read of a key that has no row.
+  const syntheticMeta: Record<string, string> = {};
+
   // Generic routing shared by almost every action: a top-level `symbol` identifies the
   // collection/token, a top-level `to` is an account the contract will ensure exists.
   const symbol = str(params.symbol);
   const to = str(params.to);
+  const quote = str(params.quote);
 
   if (contract === 'engine') {
     // Meta-actions: `setParam` reads and rewrites the single fee row; its signer
@@ -92,6 +117,50 @@ export async function buildSnapshot(
       if (to) need.balance.add(balanceKey(to, symbol));
     }
     if (to) need.account.add(to);
+  } else if (contract === 'market') {
+    // Fungible order book (docs/MARKET-DESIGN.md). `buy`/`sell` carry the trading
+    // pair and may match against the *entire* open book for it, so the book itself
+    // is prefetched (store-ordered by id — the VM re-sorts for matching, but the
+    // prefetch set must be complete: an unprefetched crossing order would raise
+    // SNAPSHOT_MISS mid-match and make the op nondeterministically fail).
+    if (action === 'cancel') {
+      const orderId = str(params.orderId);
+      if (orderId) need.marketOrder.add(orderId);
+    } else {
+      if (symbol && quote) {
+        need.token.add(symbol);
+        need.token.add(quote);
+        const book = await store.listBookOrders({
+          symbol,
+          quote,
+          status: 'OPEN',
+          limit: MAX_BOOK_PREFETCH,
+          offset: 0,
+        });
+        for (const bookOrder of book) need.marketOrder.add(bookOrder.id);
+      }
+      need.meta.add('market_order_seq');
+      need.param.add(PARAM_KEY);
+
+      // Signers pay escrow and settlement legs in both tokens of the pair; the
+      // treasury receives the trade fee in the quote token.
+      const sender = auth.active[0];
+      if (sender) need.account.add(sender);
+      for (const acct of auth.active) {
+        if (symbol) need.balance.add(balanceKey(acct, symbol));
+        if (quote) need.balance.add(balanceKey(acct, quote));
+      }
+      const paramRow = (await store.get('param', PARAM_KEY)) as Param | null;
+      if (paramRow !== null && quote) need.balance.add(balanceKey(paramRow.treasury, quote));
+
+      // Per-account open-order cap: the count is fetched here (host side) and handed
+      // to the VM through a synthetic read-only meta key (see openOrdersMetaKey).
+      if (sender) {
+        const open = await store.countBookOrders({ account: sender, status: 'OPEN' });
+        need.meta.add(openOrdersMetaKey(sender));
+        syntheticMeta[openOrdersMetaKey(sender)] = String(open);
+      }
+    }
   } else {
     if (symbol) need.collection.add(symbol);
     if (to) need.account.add(to);
@@ -245,6 +314,28 @@ export async function buildSnapshot(
       }
     }
   }
+  // marketOrder -> holder edges: a book order's owner may receive settlement (SELL
+  // orders earn quote, BUY orders earn base) and is refunded on cancel in the
+  // escrow's own token — prefetch both sides of the pair for every order account.
+  for (const orderId of [...need.marketOrder]) {
+    const raw = await store.get('marketOrder', orderId);
+    if (raw && typeof raw === 'object') {
+      const bookOrder = raw as {
+        account?: unknown;
+        symbol?: unknown;
+        quote?: unknown;
+      };
+      if (typeof bookOrder.account === 'string') {
+        need.account.add(bookOrder.account);
+        if (typeof bookOrder.symbol === 'string') {
+          need.balance.add(balanceKey(bookOrder.account, bookOrder.symbol));
+        }
+        if (typeof bookOrder.quote === 'string') {
+          need.balance.add(balanceKey(bookOrder.account, bookOrder.quote));
+        }
+      }
+    }
+  }
   // Instance -> collection edges (issue checks supply, placeOrder snapshots royalties).
   for (const key of [...need.instance]) {
     const raw = await store.get('instance', key);
@@ -253,11 +344,22 @@ export async function buildSnapshot(
     }
   }
 
-  for (const entity of ['collection', 'instance', 'account', 'order', 'token', 'balance', 'param', 'meta'] as const) {
+  for (const entity of [
+    'collection',
+    'instance',
+    'account',
+    'order',
+    'marketOrder',
+    'token',
+    'balance',
+    'param',
+    'meta',
+  ] as const) {
     for (const key of need[entity]) {
       (snapshot[entity] as Record<string, unknown>)[key] = await store.get(entity, key);
     }
   }
+  for (const [key, value] of Object.entries(syntheticMeta)) snapshot.meta[key] = value;
 
   return snapshot;
 }

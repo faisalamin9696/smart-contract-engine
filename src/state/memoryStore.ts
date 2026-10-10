@@ -1,5 +1,6 @@
 import {
   BalanceSchema,
+  BookOrderSchema,
   CollectionSchema,
   InstanceSchema,
   MarketOrderSchema,
@@ -8,6 +9,7 @@ import {
   genesisParam,
   type Balance,
   type BlockRecord,
+  type BookOrder,
   type Collection,
   type EntityKind,
   type Instance,
@@ -19,9 +21,11 @@ import {
 } from '../types/domain';
 import type {
   BalanceFilter,
+  BookOrderFilter,
   CountQuery,
   EngineStore,
   ListBalancesQuery,
+  ListBookOrdersQuery,
   ListInstancesQuery,
   ListLogsQuery,
   ListOrdersQuery,
@@ -34,6 +38,7 @@ const ENTITIES: EntityKind[] = [
   'instance',
   'account',
   'order',
+  'marketOrder',
   'token',
   'balance',
   'param',
@@ -60,6 +65,7 @@ export class MemoryStore implements EngineStore {
     instance: new Map(),
     account: new Map(),
     order: new Map(),
+    marketOrder: new Map(),
     token: new Map(),
     balance: new Map(),
     param: new Map(),
@@ -134,6 +140,32 @@ export class MemoryStore implements EngineStore {
     for (const raw of this.kv.order.values()) {
       const row = MarketOrderSchema.parse(raw);
       if (q.symbol && row.symbol !== q.symbol) continue;
+      count += 1;
+    }
+    return count;
+  }
+
+  async listBookOrders(q: ListBookOrdersQuery): Promise<BookOrder[]> {
+    let rows = [...this.kv.marketOrder.entries()].map(([, v]) => BookOrderSchema.parse(v));
+    if (q.symbol) rows = rows.filter((r) => r.symbol === q.symbol);
+    if (q.quote) rows = rows.filter((r) => r.quote === q.quote);
+    if (q.account) rows = rows.filter((r) => r.account === q.account);
+    if (q.side) rows = rows.filter((r) => r.side === q.side);
+    if (q.status) rows = rows.filter((r) => r.status === q.status);
+    // Ids are zero-padded ("MKT-00000042"), so lexicographic order = allocation order.
+    rows.sort((a, b) => a.id.localeCompare(b.id));
+    return rows.slice(q.offset, q.offset + q.limit);
+  }
+
+  async countBookOrders(q: BookOrderFilter): Promise<number> {
+    let count = 0;
+    for (const raw of this.kv.marketOrder.values()) {
+      const row = BookOrderSchema.parse(raw);
+      if (q.symbol && row.symbol !== q.symbol) continue;
+      if (q.quote && row.quote !== q.quote) continue;
+      if (q.account && row.account !== q.account) continue;
+      if (q.side && row.side !== q.side) continue;
+      if (q.status && row.status !== q.status) continue;
       count += 1;
     }
     return count;

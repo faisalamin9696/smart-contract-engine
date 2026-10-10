@@ -27,6 +27,7 @@ describe('fee engine (build order step 3)', () => {
     tokenCreationFee: '0',
     issueFee: '0',
     fillOrderFeeBps: '0',
+    tradeFeeBps: '0',
   };
 
   beforeAll(async () => {
@@ -167,6 +168,8 @@ describe('fee engine (build order step 3)', () => {
       tokenCreationFee: '20',
       issueFee: '1',
       fillOrderFeeBps: '200',
+      // untouched by this patch — stays at the genesis zero.
+      tradeFeeBps: '0',
     });
     // 3. Initial issue: the payer is the treasury itself, so the issue fee is a no-op
     //    rebate (SCE still costs nothing to mint into the treasury).

@@ -28,7 +28,7 @@ import { assertUintString } from '../utils/bn';
  */
 
 /** Contracts implemented under this op id (anything else is `UNKNOWN_CONTRACT`). */
-export const CONTRACTS = ['nft', 'tokens', 'engine'] as const;
+export const CONTRACTS = ['nft', 'tokens', 'engine', 'market'] as const;
 export type ContractName = (typeof CONTRACTS)[number];
 
 /** Standard `nft` contract actions (wiki NFT-Contracts + the marketplace extension). */
@@ -71,21 +71,30 @@ export const TOKENS_ACTIONS = [
   'updatePrecision',
 ] as const;
 
+/**
+ * `market` contract actions — the fungible order book of docs/MARKET-DESIGN.md
+ * (wiki steemsmartcontracts `market`: buy/sell/cancel, escrow at placement,
+ * in-VM price-time matching).
+ */
+export const MARKET_ACTIONS = ['buy', 'sell', 'cancel'] as const;
+
 export type NftActionName = (typeof NFT_ACTIONS)[number];
 export type TokenActionName = (typeof TOKENS_ACTIONS)[number];
 /** `engine` meta-actions (not part of either wiki contract — fee admin, see step 3). */
 export const ENGINE_ACTIONS = ['setParam'] as const;
 export type EngineActionName = (typeof ENGINE_ACTIONS)[number];
-/** Any action name across all three contracts (shared names appear in several lists). */
-export type ActionName = NftActionName | TokenActionName | EngineActionName;
+export type MarketActionName = (typeof MARKET_ACTIONS)[number];
+/** Any action name across all four contracts (shared names appear in several lists). */
+export type ActionName = NftActionName | TokenActionName | EngineActionName | MarketActionName;
 
 /** Every action any contract accepts (union — used for diagnostics). */
-export const ACTIONS = [...NFT_ACTIONS, ...TOKENS_ACTIONS, ...ENGINE_ACTIONS] as const;
+export const ACTIONS = [...NFT_ACTIONS, ...TOKENS_ACTIONS, ...ENGINE_ACTIONS, ...MARKET_ACTIONS] as const;
 
 export const ACTIONS_BY_CONTRACT: Record<ContractName, readonly ActionName[]> = {
   nft: NFT_ACTIONS,
   tokens: TOKENS_ACTIONS,
   engine: ENGINE_ACTIONS,
+  market: MARKET_ACTIONS,
 };
 
 /**
@@ -337,6 +346,26 @@ const PlaceOrderParams = z
 const FillOrderParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
 const CancelOrderParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
 
+/* ---------------------------------------------------- market contract params */
+
+/**
+ * `market.buy` / `market.sell` — one order per call: the base token (`symbol`), the
+ * quote/currency token, the base quantity and the limit price (quote per base unit).
+ * Quantity decimals are capped by the base token's precision, price decimals by the
+ * quote token's precision (both enforced in-VM against the token rows).
+ */
+const MarketTradeParams = z
+  .object({
+    symbol: SymbolSchema,
+    quote: SymbolSchema,
+    quantity: QuantitySchema,
+    price: QuantitySchema,
+  })
+  .strict();
+
+/** `market.cancel` — same orderId reference shape as the nft marketplace cancel. */
+const MarketCancelParams = z.object({ orderId: z.string().min(3).max(64) }).strict();
+
 /* --------------------------------------------------- tokens contract params */
 
 /**
@@ -381,6 +410,7 @@ const UpdatePrecisionParams = z
 
 /** Fee cut in basis points — at most 100% (10000 bps). */
 const FeeBpsSchema = UintStringSchema.refine((v) => Number(v) <= 10000, 'fillOrderFeeBps must be <= 10000');
+const TradeFeeBpsSchema = UintStringSchema.refine((v) => Number(v) <= 10000, 'tradeFeeBps must be <= 10000');
 
 /**
  * `engine.setParam` — partial patch of the in-state fee row (admin-only, enforced
@@ -396,6 +426,7 @@ const SetParamParams = z
         tokenCreationFee: QuantitySchema.optional(),
         issueFee: QuantitySchema.optional(),
         fillOrderFeeBps: FeeBpsSchema.optional(),
+        tradeFeeBps: TradeFeeBpsSchema.optional(),
       })
       .strict()
       .optional(),
@@ -453,10 +484,16 @@ const PARAM_SCHEMAS: {
   nft: Record<NftActionName, z.ZodTypeAny>;
   tokens: Record<TokenActionName, z.ZodTypeAny>;
   engine: Record<EngineActionName, z.ZodTypeAny>;
+  market: Record<MarketActionName, z.ZodTypeAny>;
 } = {
   nft: NFT_PARAM_SCHEMAS,
   tokens: TOKENS_PARAM_SCHEMAS,
   engine: { setParam: SetParamParams },
+  market: {
+    buy: MarketTradeParams,
+    sell: MarketTradeParams,
+    cancel: MarketCancelParams,
+  },
 };
 
 export class PayloadError extends Error {
@@ -593,6 +630,7 @@ export const ACTION_ENTITY_ALLOWLIST: {
   nft: Record<NftActionName, readonly string[]>;
   tokens: Record<TokenActionName, readonly string[]>;
   engine: Record<EngineActionName, readonly string[]>;
+  market: Record<MarketActionName, readonly string[]>;
 } = {
   nft: {
     create: ['collection', 'account', 'balance'],
@@ -633,6 +671,15 @@ export const ACTION_ENTITY_ALLOWLIST: {
   },
   engine: {
     setParam: ['param'],
+  },
+  market: {
+    // Matching moves balance legs (escrow debit, settlement, treasury fee) and the
+    // order book itself; `meta` carries the market order-id counter and the synthetic
+    // per-account open-order count the VM reads for its cap check.
+    buy: ['marketOrder', 'balance', 'meta', 'account'],
+    sell: ['marketOrder', 'balance', 'meta', 'account'],
+    // Cancel only refunds the escrow and closes the row — no counter, no new accounts.
+    cancel: ['marketOrder', 'balance'],
   },
 };
 

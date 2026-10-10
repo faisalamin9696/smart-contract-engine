@@ -6,8 +6,8 @@ import { EngineEventBus } from '../../src/indexer/events';
 import type { BlockHeader, OpOutcome } from '../../src/vm/executor';
 import { executeOp } from '../../src/vm/executor';
 import { createSandbox, type Sandbox, type SandboxOptions } from '../../src/vm/sandbox';
-import { BalanceSchema, CollectionSchema, InstanceSchema, MarketOrderSchema, ParamSchema, TokenSchema } from '../../src/types/domain';
-import type { Balance, Collection, Instance, MarketOrder, Mutation, Param, Token } from '../../src/types/domain';
+import { BalanceSchema, BookOrderSchema, CollectionSchema, InstanceSchema, MarketOrderSchema, ParamSchema, TokenSchema } from '../../src/types/domain';
+import type { Balance, BookOrder, Collection, Instance, MarketOrder, Mutation, Param, Token } from '../../src/types/domain';
 import { PARAM_KEY } from '../../src/types/domain';
 import type { ContractName } from '../../src/types/actions';
 
@@ -143,6 +143,12 @@ export class TestEngine {
   async order(id: string): Promise<MarketOrder | null> {
     const raw = await this.store.get('order', id);
     return raw === null ? null : MarketOrderSchema.parse(raw);
+  }
+
+  /** Fungible market book order (`marketOrder` entity), by id. */
+  async bookOrder(id: string): Promise<BookOrder | null> {
+    const raw = await this.store.get('marketOrder', id);
+    return raw === null ? null : BookOrderSchema.parse(raw);
   }
 
   async journalEntries(height = 1): Promise<Mutation[]> {

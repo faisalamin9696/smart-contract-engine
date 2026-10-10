@@ -2,12 +2,15 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 
 import type { Indexer } from '../indexer/indexer';
 import {
+  computeBookDepth,
   getAccount,
+  getBookOrder,
   getCollection,
   getInstance,
   getOrder,
   getParam,
   getToken,
+  listMarketTrades,
   type EngineStore,
 } from '../state/store';
 import { computeStateChecksum } from './checksum';
@@ -24,6 +27,7 @@ const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 
 const ORDER_STATUSES = new Set(['OPEN', 'FILLED', 'CANCELLED']);
+const BOOK_SIDES = new Set(['BUY', 'SELL']);
 const TX_STATUSES = new Set(['APPLIED', 'FAILED', 'IGNORED']);
 
 /** Express 4 does not catch rejected promises — route every handler through this. */
@@ -242,6 +246,67 @@ export function createRestRouter(deps: RestDeps): Router {
       const order = await getOrder(store, req.params.id);
       if (!order) throw httpError(404, 'NOT_FOUND', 'order not found');
       res.json({ data: order });
+    }),
+  );
+
+  // ---- market (fungible order book) ----------------------------------------
+
+  router.get(
+    '/market/orders',
+    wrap(async (req, res) => {
+      const { limit, offset } = page(req);
+      const status = enumParam(req, 'status', ORDER_STATUSES) as never;
+      const side = enumParam(req, 'side', BOOK_SIDES) as never;
+      const symbol = strParam(req, 'symbol');
+      const quote = strParam(req, 'quote');
+      const account = strParam(req, 'account');
+      const filter = { status, side, symbol, quote, account };
+      const data = await store.listBookOrders({ ...filter, limit, offset });
+      const total = await store.countBookOrders(filter);
+      res.json({ data, meta: { limit, offset, total } });
+    }),
+  );
+
+  router.get(
+    '/market/orders/:id',
+    wrap(async (req, res) => {
+      const order = await getBookOrder(store, req.params.id);
+      if (!order) throw httpError(404, 'NOT_FOUND', 'market order not found');
+      res.json({ data: order });
+    }),
+  );
+
+  /**
+   * Aggregated depth for one pair: bids (BUY) and asks (SELL), each best price
+   * first — the ladder a trading UI renders.
+   */
+  router.get(
+    '/market/book',
+    wrap(async (req, res) => {
+      const symbol = strParam(req, 'symbol');
+      const quote = strParam(req, 'quote');
+      if (!symbol || !quote) {
+        throw httpError(400, 'BAD_REQUEST', 'symbol and quote are required');
+      }
+      res.json({ data: await computeBookDepth(store, symbol, quote) });
+    }),
+  );
+
+  /**
+   * Recent fills, flattened from the `MARKET_FILLED` events of applied market ops
+   * (paginated per operation — one op's fills are never split across pages).
+   */
+  router.get(
+    '/market/trades',
+    wrap(async (req, res) => {
+      const { limit, offset } = page(req);
+      const data = await listMarketTrades(store, {
+        symbol: strParam(req, 'symbol'),
+        quote: strParam(req, 'quote'),
+        limit,
+        offset,
+      });
+      res.json({ data, meta: { limit, offset, count: data.length } });
     }),
   );
 

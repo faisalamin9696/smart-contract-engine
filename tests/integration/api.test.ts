@@ -77,6 +77,23 @@ const listTx = customJsonTx(
   { action: 'placeOrder', params: { symbol: 'RAID', id: '1', price: '12.345' } },
   active('carol'),
 );
+// market contract (fungible book): a base token, a resting sell and a crossing buy
+const gldCreateTx = customJsonTx(
+  { contract: 'tokens', action: 'create', params: { symbol: 'GLD', name: 'Gold', precision: 2 } },
+  active('alice'),
+);
+const gldIssueTx = customJsonTx(
+  { contract: 'tokens', action: 'issue', params: { symbol: 'GLD', to: 'alice', quantity: '100' } },
+  active('alice'),
+);
+const marketSellTx = customJsonTx(
+  { contract: 'market', action: 'sell', params: { symbol: 'GLD', quote: 'SCE', quantity: '10', price: '2' } },
+  active('alice'),
+);
+const marketBuyTx = customJsonTx(
+  { contract: 'market', action: 'buy', params: { symbol: 'GLD', quote: 'SCE', quantity: '4', price: '2' } },
+  active('bob'),
+);
 
 /* ------------------------------------------------------------ tiny ws client */
 
@@ -159,6 +176,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
   let star: TestClient;
   let carol: TestClient;
   let tokenWatcher: TestClient;
+  let marketWatcher: TestClient;
   let base: string;
   let wsUrl: string;
 
@@ -168,6 +186,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     rpc.mine({ transactions: [mintBobTx] });
     rpc.mine({ transactions: [transferTx] });
     rpc.mine({ transactions: [sceTx, issueTx, listTx] });
+    rpc.mine({ transactions: [gldCreateTx, gldIssueTx, marketSellTx, marketBuyTx] });
 
     store = new MemoryStore();
     sandbox = await createSandbox({ provider: 'node-vm', timeoutMs: 1000, memoryLimitMb: 128 });
@@ -202,6 +221,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     star = await TestClient.connect(wsUrl, ['*']);
     carol = await TestClient.connect(wsUrl, ['account:carol']);
     tokenWatcher = await TestClient.connect(wsUrl, ['token:SCE']);
+    marketWatcher = await TestClient.connect(wsUrl, ['market']);
 
     await indexer.catchUp();
   });
@@ -210,6 +230,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     await star?.close();
     await carol?.close();
     await tokenWatcher?.close();
+    await marketWatcher?.close();
     await api?.close();
     await sandbox?.dispose();
     await store?.close();
@@ -221,13 +242,13 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     expect(await health.json()).toMatchObject({
       status: 'ok',
       storage: 'memory',
-      indexer: { running: false, cursorHeight: 4, opId: 'sce-mainnet1' },
+      indexer: { running: false, cursorHeight: 5, opId: 'sce-mainnet1' },
     });
 
     const status = await fetch(`${base}/api/v1/status`);
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({
-      data: { cursorHeight: 4, storage: 'memory', headHeight: 4, opId: 'sce-mainnet1' },
+      data: { cursorHeight: 5, storage: 'memory', headHeight: 5, opId: 'sce-mainnet1' },
     });
   });
 
@@ -282,11 +303,11 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     });
 
     const logs = await getJson(`${base}/api/v1/logs?actor=alice`);
-    // alice created the RAID collection, created the SCE price token and issued the
-    // test supply — every row is an applied op, two of them collection/token creates
-    expect(logs.data).toHaveLength(3);
+    // alice created the RAID collection, created both price/base tokens, issued both
+    // test supplies and placed the resting market sell — every row an applied op
+    expect(logs.data).toHaveLength(6);
     expect(logs.data.every((l: { status: string }) => l.status === 'APPLIED')).toBe(true);
-    expect(logs.data.filter((l: { action: string }) => l.action === 'create')).toHaveLength(2);
+    expect(logs.data.filter((l: { action: string }) => l.action === 'create')).toHaveLength(3);
     expect(logs.data.some((l: { action: string }) => l.action === 'issue')).toBe(true);
 
     const block = await getJson(`${base}/api/v1/blocks/2`);
@@ -295,8 +316,9 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
 
   it('reads fungible tokens, balances and params over REST', async () => {
     const tokens = await getJson(`${base}/api/v1/tokens`);
-    expect(tokens.data).toHaveLength(1);
-    expect(tokens.data[0]).toMatchObject({
+    expect(tokens.data).toHaveLength(2);
+    expect(tokens.data.map((t: { symbol: string }) => t.symbol)).toEqual(['GLD', 'SCE']);
+    expect(tokens.data[1]).toMatchObject({
       symbol: 'SCE',
       name: 'Smart Contract Engine',
       precision: 3,
@@ -312,9 +334,12 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     expect(unknown.status).toBe(404);
 
     const balances = await getJson(`${base}/api/v1/balances?account=bob`);
-    expect(balances.data).toHaveLength(1);
-    expect(balances.data[0]).toMatchObject({ account: 'bob', symbol: 'SCE', quantity: '1000' });
-    expect(balances.meta.total).toBe(1);
+    expect(balances.data).toHaveLength(2);
+    // bob's SCE paid the buy escrow (4 x 2 = 8) and the fill delivered 4 GLD
+    expect(balances.data.map((b: { symbol: string }) => b.symbol)).toEqual(['GLD', 'SCE']);
+    expect(balances.data[0]).toMatchObject({ account: 'bob', symbol: 'GLD', quantity: '4' });
+    expect(balances.data[1]).toMatchObject({ account: 'bob', symbol: 'SCE', quantity: '992' });
+    expect(balances.meta.total).toBe(2);
 
     const filtered = await getJson(`${base}/api/v1/balances?account=bob&symbol=RAID`);
     expect(filtered.data).toHaveLength(0);
@@ -408,7 +433,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
         { id: 'ORD-00000001', instanceId: 'RAID:1', price: '12.345', status: 'OPEN', instance: { id: '1' } },
       ],
       instance: { id: '1', owner: 'carol' },
-      status: { opId: 'sce-mainnet1', storage: 'memory', cursorHeight: 4 },
+      status: { opId: 'sce-mainnet1', storage: 'memory', cursorHeight: 5 },
     });
   });
 
@@ -467,15 +492,137 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     const body = (await response.json()) as { data?: Record<string, unknown>; errors?: unknown[] };
     expect(body.errors).toBeUndefined();
     expect(body.data).toMatchObject({
-      tokens: [{ symbol: 'SCE', precision: 3, supply: '1000', maxSupply: '0', issuer: 'alice' }],
+      tokens: [
+        { symbol: 'GLD', precision: 2, supply: '100', maxSupply: '0', issuer: 'alice' },
+        { symbol: 'SCE', precision: 3, supply: '1000', maxSupply: '0', issuer: 'alice' },
+      ],
       token: { name: 'Smart Contract Engine', metadata: '' },
-      balances: [{ account: 'bob', symbol: 'SCE', quantity: '1000' }],
+      balances: [
+        { account: 'bob', symbol: 'GLD', quantity: '4' },
+        { account: 'bob', symbol: 'SCE', quantity: '992' },
+      ],
       params: {
         admin: 'steempro.com',
         treasury: 'steempro.com',
         fees: { tokenCreationFee: '0', fillOrderFeeBps: '0' },
         feeTokens: ['SCE'],
       },
+    });
+  });
+
+  it('serves the fungible market book, depth and trades over REST', async () => {
+    const open = await getJson(`${base}/api/v1/market/orders?status=OPEN`);
+    expect(open.data).toHaveLength(1);
+    expect(open.data[0]).toMatchObject({
+      id: 'MKT-00000001',
+      account: 'alice',
+      side: 'SELL',
+      symbol: 'GLD',
+      quote: 'SCE',
+      quantity: '6', // 10 rested, 4 filled by the crossing buy
+      filled: '4',
+      price: '2',
+      escrow: '6',
+      status: 'OPEN',
+    });
+
+    const single = await getJson(`${base}/api/v1/market/orders/MKT-00000002`);
+    expect(single.data).toMatchObject({ side: 'BUY', status: 'FILLED', quantity: '0', escrow: '0' });
+
+    const missing = await fetch(`${base}/api/v1/market/orders/MKT-99999999`);
+    expect(missing.status).toBe(404);
+
+    const depth = await getJson(`${base}/api/v1/market/book?symbol=GLD&quote=SCE`);
+    expect(depth.data.asks).toEqual([{ price: '2', quantity: '6', orders: 1 }]);
+    expect(depth.data.bids).toEqual([]);
+
+    const trades = await getJson(`${base}/api/v1/market/trades?symbol=GLD`);
+    expect(trades.data).toHaveLength(1);
+    expect(trades.data[0]).toMatchObject({
+      buyOrderId: 'MKT-00000002',
+      sellOrderId: 'MKT-00000001',
+      buyer: 'bob',
+      seller: 'alice',
+      base: 'GLD',
+      quote: 'SCE',
+      quantity: '4',
+      price: '2',
+      cost: '8',
+      fee: '0',
+    });
+
+    const badSide = await fetch(`${base}/api/v1/market/orders?side=NOPE`);
+    expect(badSide.status).toBe(400);
+    const noPair = await fetch(`${base}/api/v1/market/book?symbol=GLD`);
+    expect(noPair.status).toBe(400);
+  });
+
+  it('answers market queries over GraphQL', async () => {
+    const query = /* GraphQL */ `
+      {
+        bookOrders(status: OPEN) {
+          id
+          account
+          side
+          quantity
+          escrow
+          status
+        }
+        book(symbol: "GLD", quote: "SCE") {
+          bids {
+            price
+            quantity
+            orders
+          }
+          asks {
+            price
+            quantity
+            orders
+          }
+        }
+        trades(symbol: "GLD") {
+          buyOrderId
+          sellOrderId
+          buyer
+          seller
+          quantity
+          price
+          cost
+          fee
+        }
+        params {
+          fees {
+            tradeFeeBps
+          }
+        }
+      }
+    `;
+    const response = await fetch(`${base}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { data?: Record<string, unknown>; errors?: unknown[] };
+    expect(body.errors).toBeUndefined();
+    expect(body.data).toMatchObject({
+      bookOrders: [
+        { id: 'MKT-00000001', account: 'alice', side: 'SELL', quantity: '6', escrow: '6', status: 'OPEN' },
+      ],
+      book: { bids: [], asks: [{ price: '2', quantity: '6', orders: 1 }] },
+      trades: [
+        {
+          buyOrderId: 'MKT-00000002',
+          sellOrderId: 'MKT-00000001',
+          buyer: 'bob',
+          seller: 'alice',
+          quantity: '4',
+          price: '2',
+          cost: '8',
+          fee: '0',
+        },
+      ],
+      params: { fees: { tradeFeeBps: '0' } },
     });
   });
 
@@ -521,6 +668,21 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
 
     // wildcard subscribers observe the same synthesized balance event
     await waitFor(() => star.events('BALANCE_CHANGED').length > 0, 'star balance events');
+  });
+
+  it('routes fungible market activity to the market lane', async () => {
+    await waitFor(() => marketWatcher.events('MARKET_FILLED').length > 0, 'market fill events');
+    const types = marketWatcher.events().map((e) => e.type as string);
+    expect(types).toContain('MARKET_PLACED'); // alice's sell rested on the book
+    expect(types).toContain('MARKET_FILLED'); // bob's buy crossed it (maker priority)
+    // NFT activity shares the market lane by design (channelsFor pushes it for every
+    // symbol-bearing collection event and every ORDER_* listing event); the fungible
+    // balance/token lanes must not leak in.
+    expect(types).toContain('ORDER_PLACED');
+    expect(types).not.toContain('BALANCE_CHANGED');
+
+    const fill = marketWatcher.events('MARKET_FILLED')[0];
+    expect(fill).toMatchObject({ symbol: 'GLD', price: '2' });
   });
 
   it('validates subscriptions and answers pings', async () => {

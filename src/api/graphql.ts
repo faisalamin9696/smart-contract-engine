@@ -3,12 +3,15 @@ import { GraphQLError, GraphQLScalarType, Kind, type DocumentNode, type Fragment
 import type { NextFunction, Request, Response } from 'express';
 
 import {
+  computeBookDepth,
   getAccount,
+  getBookOrder,
   getCollection,
   getInstance,
   getOrder,
   getParam,
   getToken,
+  listMarketTrades,
   type EngineStore,
 } from '../state/store';
 import type { Indexer } from '../indexer/indexer';
@@ -235,6 +238,8 @@ const typeDefs = /* GraphQL */ `
     issueFee: String!
     "Marketplace fill fee in basis points, credited to the treasury"
     fillOrderFeeBps: String!
+    "Fungible market trade fee in basis points (absence = 0; raised via setParam)"
+    tradeFeeBps: String!
   }
 
   type Settlement {
@@ -264,6 +269,73 @@ const typeDefs = /* GraphQL */ `
     fillBy: String
     settlement: Settlement
     instance: Instance
+  }
+
+  enum Side {
+    BUY
+    SELL
+  }
+
+  "Fungible market book order (docs/MARKET-DESIGN.md — market.buy/sell/cancel)."
+  type BookOrder {
+    id: String!
+    "Order owner: the only account that may cancel it"
+    account: String!
+    side: Side!
+    "Base token being traded"
+    symbol: String!
+    "Quote/settlement token (escrow denomination for BUY orders)"
+    quote: String!
+    "Remaining base quantity (decimal string)"
+    quantity: String!
+    "Cumulative base quantity filled so far"
+    filled: String!
+    "Limit price: quote units per base unit"
+    price: String!
+    "Remaining escrow: quote units (BUY) or base units (SELL)"
+    escrow: String!
+    status: OrderStatus!
+    createdAtBlock: Int!
+    updatedAtBlock: Int!
+    filledAtBlock: Int
+  }
+
+  "One aggregated price level of the fungible book."
+  type BookLevel {
+    price: String!
+    "Summed remaining base quantity at this price (exact decimal math)"
+    quantity: String!
+    "Number of resting orders contributing to the level"
+    orders: Int!
+  }
+
+  type BookDepth {
+    "BUY levels, best (highest) price first"
+    bids: [BookLevel!]!
+    "SELL levels, best (lowest) price first"
+    asks: [BookLevel!]!
+  }
+
+  "One fill between a BUY and a SELL order (maker priority)."
+  type MarketTrade {
+    height: Int!
+    timestamp: String!
+    txId: String!
+    opIndex: Int!
+    buyOrderId: String!
+    sellOrderId: String!
+    buyer: String!
+    seller: String!
+    "Base token"
+    base: String!
+    "Quote/settlement token"
+    quote: String!
+    quantity: String!
+    "Execution price (the resting order's price)"
+    price: String!
+    cost: String!
+    "Treasury cut of the quote proceeds"
+    fee: String!
   }
 
   "Deterministic execution trace of one operation."
@@ -336,6 +408,20 @@ const typeDefs = /* GraphQL */ `
     params: Params
     orders(status: OrderStatus, symbol: String, seller: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Order!]!
     order(id: String!): Order
+    bookOrders(
+      status: OrderStatus
+      side: Side
+      symbol: String
+      quote: String
+      account: String
+      limit: Int = ${DEFAULT_LIMIT}
+      offset: Int = 0
+    ): [BookOrder!]!
+    bookOrder(id: String!): BookOrder
+    "Aggregated depth (bids/asks) for one trading pair."
+    book(symbol: String!, quote: String!): BookDepth!
+    "Recent fills, newest market ops first (paginated per operation)."
+    trades(symbol: String, quote: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [MarketTrade!]!
     logs(actor: String, instanceId: String, symbol: String, height: Int, status: TxStatus, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [TransactionLog!]!
     block(height: Int!): Block
     latestBlock: Block
@@ -471,6 +557,47 @@ function buildResolvers() {
       order: (_: unknown, args: { id: string }, ctx: GraphQLContext) =>
         getOrder(ctx.store, args.id),
 
+      bookOrders: (
+        _: unknown,
+        args: {
+          status?: string;
+          side?: string;
+          symbol?: string;
+          quote?: string;
+          account?: string;
+          limit?: number;
+          offset?: number;
+        },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listBookOrders({
+          status: (args.status ?? undefined) as never,
+          side: (args.side ?? undefined) as never,
+          symbol: args.symbol ?? undefined,
+          quote: args.quote ?? undefined,
+          account: args.account ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      bookOrder: (_: unknown, args: { id: string }, ctx: GraphQLContext) =>
+        getBookOrder(ctx.store, args.id),
+
+      book: (_: unknown, args: { symbol: string; quote: string }, ctx: GraphQLContext) =>
+        computeBookDepth(ctx.store, args.symbol, args.quote),
+
+      trades: (
+        _: unknown,
+        args: { symbol?: string; quote?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        listMarketTrades(ctx.store, {
+          symbol: args.symbol ?? undefined,
+          quote: args.quote ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
       logs: (
         _: unknown,
         args: {
@@ -556,6 +683,12 @@ function buildResolvers() {
         }),
       instanceCount: (parent: { name: string }, _: unknown, ctx: GraphQLContext) =>
         ctx.store.countInstances({ owner: parent.name }),
+    },
+
+    FeeSchedule: {
+      // Absence means zero: param rows written before the market contract existed
+      // (and their undo before-images) carry no tradeFeeBps key.
+      tradeFeeBps: (parent: { tradeFeeBps?: string }) => parent.tradeFeeBps ?? '0',
     },
 
     Order: {

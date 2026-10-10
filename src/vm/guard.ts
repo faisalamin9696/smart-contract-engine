@@ -3,6 +3,7 @@ import {
   balanceKey,
   parseEntityValue,
   type Balance,
+  type BookOrder,
   type Collection,
   type EntityKind,
   type Instance,
@@ -56,6 +57,10 @@ const IMMUTABLE_FIELDS: Record<EntityKind, readonly string[]> = {
     'royaltyRecipient',
     'createdAtBlock',
   ],
+  // Book order: identity, side, the pair, the limit price and the creation block are
+  // frozen at placement; only the working fields (quantity/filled/escrow/status and
+  // the update markers) move as fills and cancels happen.
+  marketOrder: ['id', 'account', 'side', 'symbol', 'quote', 'price', 'createdAtBlock'],
   // Token: `supply` moves ± with issue/burn and `precision` may only rise
   // (updatePrecision) — both are invariants for the tokens handlers; identity, the
   // friendly name (tokens have no wiki rename action) and the issuance cap are
@@ -285,6 +290,59 @@ function assertBalancePrecision(balance: Balance, snapshot: StateSnapshot): void
 }
 
 /**
+ * Book-order invariants (`market` contract):
+ *  - a new order starts OPEN;
+ *  - terminal rows (FILLED/CANCELLED) are frozen — no working field may move again;
+ *  - `filled` only grows while the order is open;
+ *  - a terminal order released everything it held: `quantity` and `escrow` are "0"
+ *    (fills move escrow to counterparties; a cancel refunds the rest).
+ *
+ * Escrow/quantity can never go negative: the schema regex forbids a sign and the VM
+ * does exact BigNumber arithmetic; the conservation sum below independently pins
+ * every escrow delta to a balance delta.
+ */
+function assertBookOrderInvariants(before: BookOrder | null, after: BookOrder): void {
+  if (before === null) {
+    if (after.status !== 'OPEN') {
+      throw new MutationGuardError(
+        'GUARD_BOOK_ORDER_INITIAL_STATUS',
+        `new book order ${after.id} must start OPEN (got ${after.status})`,
+      );
+    }
+    return;
+  }
+  if (before.status !== 'OPEN') {
+    const frozen =
+      after.status === before.status &&
+      after.quantity === before.quantity &&
+      after.filled === before.filled &&
+      after.escrow === before.escrow &&
+      after.updatedAtBlock === before.updatedAtBlock &&
+      after.filledAtBlock === before.filledAtBlock;
+    if (!frozen) {
+      throw new MutationGuardError(
+        'GUARD_BOOK_ORDER_FINAL',
+        `book order ${before.id} is already ${before.status} and may not change again`,
+      );
+    }
+    return;
+  }
+  if (scaledDecimal(after.filled) < scaledDecimal(before.filled)) {
+    throw new MutationGuardError(
+      'GUARD_BOOK_ORDER_FILLED_REGRESSION',
+      `filled of book order ${before.id} may not decrease: ${before.filled} -> ${after.filled}`,
+    );
+  }
+  if (after.status !== 'OPEN' && (scaledDecimal(after.quantity) !== 0n || scaledDecimal(after.escrow) !== 0n)) {
+    throw new MutationGuardError(
+      'GUARD_BOOK_ORDER_RESIDUE',
+      `terminal book order ${after.id} must end with zero quantity and zero escrow ` +
+        `(got quantity=${after.quantity}, escrow=${after.escrow})`,
+    );
+  }
+}
+
+/**
  * Ledger conservation invariant (docs/TOKENS-DESIGN.md decision 3): within one op the
  * signed sum of every `balance` delta for a symbol must equal that token's `supply`
  * delta. Transfers and fees merely shuffle balances (net zero); only `issue` (+) and
@@ -295,19 +353,41 @@ function assertBalancePrecision(balance: Balance, snapshot: StateSnapshot): void
 function assertConservation(mutations: readonly Mutation[], snapshot: StateSnapshot): void {
   const balanceDeltas = new Map<string, bigint>();
   const supplyDeltas = new Map<string, bigint>();
+  // An op may write the same key several times (the market matcher rewrites the
+  // taker's row on every fill): each write must be diffed against the PREVIOUS
+  // write in the same op, not against the original snapshot value — only the net
+  // movement of a key may count towards the ledger sum.
+  const prior = new Map<string, JsonValue | null>();
+  const priorRow = (entity: 'balance' | 'token' | 'marketOrder', key: string): JsonValue | null => {
+    const mapKey = `${entity}:${key}`;
+    if (prior.has(mapKey)) return prior.get(mapKey) ?? null;
+    return snapshot[entity][key] ?? null;
+  };
 
   for (const mutation of mutations) {
     if (mutation.entity === 'balance') {
       const after = mutation.value as unknown as Balance;
-      const before = snapshot.balance[mutation.key]?.quantity ?? '0';
+      const before = (priorRow('balance', mutation.key) as Balance | null)?.quantity ?? '0';
       const delta = scaledDecimal(after.quantity) - scaledDecimal(before);
       balanceDeltas.set(after.symbol, (balanceDeltas.get(after.symbol) ?? 0n) + delta);
     } else if (mutation.entity === 'token') {
       const after = mutation.value as unknown as Token;
-      const before = snapshot.token[mutation.key]?.supply ?? '0';
+      const before = (priorRow('token', mutation.key) as Token | null)?.supply ?? '0';
       const delta = scaledDecimal(after.supply) - scaledDecimal(before);
       supplyDeltas.set(after.symbol, (supplyDeltas.get(after.symbol) ?? 0n) + delta);
+    } else if (mutation.entity === 'marketOrder') {
+      // Escrow held on a book order is a balance-equivalent of its side's token
+      // (quote for BUY, base for SELL): placement moves balance -> escrow, fills
+      // move escrow -> counterparty balances + treasury, cancels escrow -> balance.
+      // Counting it here makes the whole market flow subject to the same net-zero
+      // rule as every transfer and fee.
+      const after = mutation.value as unknown as BookOrder;
+      const before = (priorRow('marketOrder', mutation.key) as BookOrder | null)?.escrow ?? '0';
+      const delta = scaledDecimal(after.escrow) - scaledDecimal(before);
+      const escrowSymbol = after.side === 'BUY' ? after.quote : after.symbol;
+      balanceDeltas.set(escrowSymbol, (balanceDeltas.get(escrowSymbol) ?? 0n) + delta);
     }
+    prior.set(`${mutation.entity}:${mutation.key}`, mutation.value as JsonValue | null);
   }
 
   const symbols = new Set([...balanceDeltas.keys(), ...supplyDeltas.keys()]);
@@ -365,6 +445,11 @@ export function validateMutations(
   }
   const allowed = new Set<string>(list);
   const validated: Mutation[] = [];
+  // Latest after-image per key inside this op: an op may write the same key several
+  // times (the market matcher rewrites the taker's row on every fill), and every
+  // invariant check must compare a write against the previous write, not against the
+  // original snapshot value.
+  const prior = new Map<string, JsonValue | null>();
 
   for (const raw of rawMutations) {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -384,9 +469,10 @@ export function validateMutations(
       );
     }
 
-    const before = (snapshot as unknown as Record<string, Record<string, JsonValue | undefined>>)[
-      entity
-    ]?.[key];
+    const priorKey = `${entity}:${key}`;
+    const before: JsonValue | undefined = prior.has(priorKey)
+      ? (prior.get(priorKey) ?? undefined)
+      : (snapshot as unknown as Record<string, Record<string, JsonValue | undefined>>)[entity]?.[key];
 
     if (value === null || value === undefined) {
       if (before === undefined) {
@@ -399,6 +485,7 @@ export function validateMutations(
         throw new MutationGuardError('GUARD_DELETE_DENIED', `entity '${entity}' is not destructible`);
       }
       validated.push({ entity, key, value: null } as Mutation);
+      prior.set(priorKey, null);
       continue;
     }
 
@@ -443,15 +530,22 @@ export function validateMutations(
           throw new MutationGuardError('GUARD_ORDER_FINAL', `order ${b.id} is already ${b.status}`);
         }
       }
+      if (entity === 'marketOrder') {
+        assertBookOrderInvariants(before as unknown as BookOrder, parsed as BookOrder);
+      }
     } else if (entity === 'instance') {
       // Brand-new token (mint): validate its properties against the schema too.
       assertInstanceInvariants(undefined, parsed as Instance, snapshot);
     } else if (entity === 'token') {
       // Brand-new fungible token row (create): must start at zero supply.
       assertTokenInvariants(before ?? null, parsed as Token);
+    } else if (entity === 'marketOrder') {
+      // Brand-new book order (buy/sell resting on the book): must start OPEN.
+      assertBookOrderInvariants(null, parsed as BookOrder);
     }
 
     validated.push({ entity, key, value: parsed } as Mutation);
+    prior.set(priorKey, parsed as JsonValue);
   }
 
   assertConservation(validated, snapshot);

@@ -2,6 +2,7 @@ import {
   AccountSchema,
   balanceKey,
   BalanceSchema,
+  BookOrderSchema,
   CollectionSchema,
   InstanceSchema,
   MarketOrderSchema,
@@ -11,6 +12,8 @@ import {
   type Account,
   type Balance,
   type BlockRecord,
+  type BookOrder,
+  type BookOrderStatus,
   type Collection,
   type EntityKind,
   type Instance,
@@ -23,6 +26,7 @@ import {
   type TransactionLogRecord,
   type TxStatus,
 } from '../types/domain';
+import { bn } from '../utils/bn';
 
 /**
  * Sentinel for `putJournal(height, [])`: an empty block still has a journal, so the
@@ -65,6 +69,19 @@ export interface ListOrdersQuery {
   offset: number;
 }
 
+/** Filters for the fungible `market` book (all optional; combined with AND). */
+export interface ListBookOrdersQuery {
+  symbol?: string;
+  quote?: string;
+  account?: string;
+  side?: 'BUY' | 'SELL';
+  status?: BookOrderStatus;
+  limit: number;
+  offset: number;
+}
+
+export type BookOrderFilter = Omit<ListBookOrdersQuery, 'limit' | 'offset'>;
+
 export interface ListLogsQuery {
   actor?: string;
   instanceId?: string;
@@ -102,6 +119,8 @@ export interface EngineStore {
   countInstances(q: CountQuery): Promise<number>;
   listOrders(q: ListOrdersQuery): Promise<MarketOrder[]>;
   countOrders(q: CountQuery): Promise<number>;
+  listBookOrders(q: ListBookOrdersQuery): Promise<BookOrder[]>;
+  countBookOrders(q: BookOrderFilter): Promise<number>;
   listTokens(q: ListTokensQuery): Promise<Token[]>;
   listBalances(q: ListBalancesQuery): Promise<Balance[]>;
   countBalances(q: BalanceFilter): Promise<number>;
@@ -173,6 +192,11 @@ export async function getOrder(store: EngineStore, id: string): Promise<MarketOr
   return raw === null ? null : MarketOrderSchema.parse(raw);
 }
 
+export async function getBookOrder(store: EngineStore, id: string): Promise<BookOrder | null> {
+  const raw = await store.get('marketOrder', id);
+  return raw === null ? null : BookOrderSchema.parse(raw);
+}
+
 export async function getToken(store: EngineStore, symbol: string): Promise<Token | null> {
   const raw = await store.get('token', symbol);
   return raw === null ? null : TokenSchema.parse(raw);
@@ -191,6 +215,133 @@ export async function getBalance(
 export async function getParam(store: EngineStore): Promise<Param | null> {
   const raw = await store.get('param', PARAM_KEY);
   return raw === null ? null : ParamSchema.parse(raw);
+}
+
+/* ------------------------------------------- market read models (REST/GraphQL) */
+
+/** One aggregated price level of the fungible book. */
+export interface BookLevel {
+  price: string;
+  /** Summed remaining base quantity at this price (exact decimal arithmetic). */
+  quantity: string;
+  /** Number of resting orders contributing to the level. */
+  orders: number;
+}
+
+export interface BookDepth {
+  /** BUY levels, best (highest) price first. */
+  bids: BookLevel[];
+  /** SELL levels, best (lowest) price first. */
+  asks: BookLevel[];
+}
+
+/** Depth levels per side returned by {@link computeBookDepth}. */
+export const BOOK_DEPTH_LEVELS = 50;
+/** Open rows aggregated per side — safety valve against a pathological book. */
+export const BOOK_DEPTH_ROW_CAP = 1000;
+
+/**
+ * Aggregated depth for one trading pair: open orders summed per price level with
+ * exact decimal math (bignumber.js — never floats). The result is the ladder a
+ * trading UI renders; both the REST and GraphQL surfaces share this helper.
+ */
+export async function computeBookDepth(
+  store: EngineStore,
+  symbol: string,
+  quote: string,
+): Promise<BookDepth> {
+  const [bids, asks] = await Promise.all([
+    store.listBookOrders({ symbol, quote, status: 'OPEN', side: 'BUY', limit: BOOK_DEPTH_ROW_CAP, offset: 0 }),
+    store.listBookOrders({ symbol, quote, status: 'OPEN', side: 'SELL', limit: BOOK_DEPTH_ROW_CAP, offset: 0 }),
+  ]);
+  const levels = (rows: BookOrder[], bestFirst: boolean): BookLevel[] => {
+    const byPrice = new Map<string, BookLevel>();
+    for (const row of rows) {
+      const level = byPrice.get(row.price) ?? { price: row.price, quantity: '0', orders: 0 };
+      level.quantity = bn(level.quantity).plus(row.quantity).toFixed();
+      level.orders += 1;
+      byPrice.set(row.price, level);
+    }
+    return [...byPrice.values()]
+      .sort((a, b) => {
+        const cmp = bn(a.price).comparedTo(b.price) ?? 0;
+        return bestFirst ? -cmp : cmp;
+      })
+      .slice(0, BOOK_DEPTH_LEVELS);
+  };
+  return { bids: levels(bids, true), asks: levels(asks, false) };
+}
+
+/** One fill between a BUY and a SELL order (flattened from a `MARKET_FILLED` event). */
+export interface MarketTrade {
+  height: number;
+  timestamp: string;
+  txId: string;
+  opIndex: number;
+  buyOrderId: string;
+  sellOrderId: string;
+  buyer: string;
+  seller: string;
+  /** Base token. */
+  base: string;
+  /** Quote/settlement token. */
+  quote: string;
+  quantity: string;
+  /** Execution price (the resting order's price — maker priority). */
+  price: string;
+  cost: string;
+  /** Treasury cut of the quote proceeds (`param.fees.tradeFeeBps`). */
+  fee: string;
+}
+
+/**
+ * Recent fills of the fungible `market` contract, flattened from the
+ * `MARKET_FILLED` events recorded on applied buy/sell ops (the log rows are the
+ * durable trade history — no separate trade table to re-org).
+ *
+ * Pagination is per *operation*: one op may emit several fills and they are never
+ * split across pages. Newest ops first (listLogs order).
+ */
+export async function listMarketTrades(
+  store: EngineStore,
+  q: { symbol?: string; quote?: string; limit: number; offset: number },
+): Promise<MarketTrade[]> {
+  const logs = await store.listLogs({
+    symbol: q.symbol,
+    status: 'APPLIED',
+    limit: q.limit,
+    offset: q.offset,
+  });
+  const trades: MarketTrade[] = [];
+  for (const log of logs) {
+    if (!Array.isArray(log.events)) continue;
+    for (const raw of log.events) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const event = raw as Record<string, unknown>;
+      if (event.type !== 'MARKET_FILLED') continue;
+      const data = (event.data ?? {}) as Record<string, unknown>;
+      const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+      const tradeQuote = str(data.quote);
+      if (q.quote !== undefined && tradeQuote !== q.quote) continue;
+      trades.push({
+        height: log.height,
+        timestamp: log.timestamp,
+        txId: log.txId,
+        opIndex: log.opIndex,
+        buyOrderId: str(data.buyOrderId),
+        sellOrderId: str(data.sellOrderId),
+        buyer: str(data.buyer),
+        seller: str(data.seller),
+        base: str(event.symbol),
+        quote: tradeQuote,
+        quantity: str(data.quantity),
+        price: typeof event.price === 'string' ? event.price : '',
+        cost: str(data.cost),
+        fee: str(data.fee),
+      });
+    }
+  }
+  return trades;
 }
 
 export function entityKey(entity: EntityKind, key: string): string {

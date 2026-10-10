@@ -33,7 +33,7 @@ const MIGRATION_DIR = path.join(__dirname, '..', '..', 'prisma', 'migrations', '
 const MIGRATION_SQL = readFileSync(path.join(MIGRATION_DIR, 'migration.sql'), 'utf8');
 const PRISMA_SCHEMA = readFileSync(path.join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8');
 
-/** Genesis shape: exactly what migration 0003 inserts (fee bootstrap = all zero). */
+/** Genesis shape: exactly what migration 0003 inserts + 0006 backfills (fee bootstrap = all zero). */
 const GENESIS_PARAM: Param = {
   admin: 'steempro.com',
   treasury: 'steempro.com',
@@ -43,6 +43,7 @@ const GENESIS_PARAM: Param = {
     tokenCreationFee: '0',
     issueFee: '0',
     fillOrderFeeBps: '0',
+    tradeFeeBps: '0',
   },
   feeTokens: ['SCE'],
 };
