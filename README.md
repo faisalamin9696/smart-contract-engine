@@ -33,7 +33,7 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 [Security & threat model](docs/SECURITY.md) ·
 [Testnet](docs/TESTNET.md) ·
 [Deployment](docs/DEPLOYMENT.md) · [Dokploy](docs/DOKPLOY.md) ·
-[Tokens design](docs/TOKENS-DESIGN.md) · [Contributing](CONTRIBUTING.md) ·
+[Tokens design](docs/TOKENS-DESIGN.md) · [Market design](docs/MARKET-DESIGN.md) · [Contributing](CONTRIBUTING.md) ·
 [License](LICENSE) (MIT)
 
 ## What it does
