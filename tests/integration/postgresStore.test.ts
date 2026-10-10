@@ -10,6 +10,7 @@ import { MemoryStore } from '../../src/state/memoryStore';
 import type { EngineStore } from '../../src/state/store';
 import type {
   BlockRecord,
+  BookOrder,
   Collection,
   Instance,
   JournalEntry,
@@ -107,6 +108,24 @@ function order(id: string, symbol: string, instanceId: string, seller: string, c
   };
 }
 
+function bookOrder(id: string, account: string, side: 'BUY' | 'SELL'): BookOrder {
+  return {
+    id,
+    account,
+    side,
+    symbol: 'GLD',
+    quote: 'SCE',
+    quantity: side === 'BUY' ? '7' : '3.50',
+    filled: '0',
+    price: '2.500',
+    escrow: side === 'BUY' ? '17.500' : '3.50',
+    status: 'OPEN',
+    createdAtBlock: H1,
+    updatedAtBlock: H1,
+    filledAtBlock: null,
+  };
+}
+
 function token(symbol: string, issuer = 'tstalice'): Token {
   return {
     symbol,
@@ -197,6 +216,7 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await client.settingRecord.deleteMany({ where: { key: { startsWith: 'TST' } } });
     await client.accountRecord.deleteMany({ where: { name: { startsWith: 'tst' } } });
     await client.marketOrderRecord.deleteMany({ where: { id: { startsWith: 'ORD-TST' } } });
+    await client.bookOrderRecord.deleteMany({ where: { id: { startsWith: 'MKT-TST' } } });
     await client.instanceRecord.deleteMany({ where: { symbol: 'TST' } });
     await client.collectionRecord.deleteMany({ where: { symbol: 'TST' } });
     await client.tokenRecord.deleteMany({ where: { issuer: 'tstalice' } });
@@ -213,6 +233,7 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
       await client.settingRecord.deleteMany({ where: { key: { startsWith: 'TST' } } });
       await client.accountRecord.deleteMany({ where: { name: { startsWith: 'tst' } } });
       await client.marketOrderRecord.deleteMany({ where: { id: { startsWith: 'ORD-TST' } } });
+      await client.bookOrderRecord.deleteMany({ where: { id: { startsWith: 'MKT-TST' } } });
       await client.instanceRecord.deleteMany({ where: { symbol: 'TST' } });
       await client.collectionRecord.deleteMany({ where: { symbol: 'TST' } });
       await client.tokenRecord.deleteMany({ where: { issuer: 'tstalice' } });
@@ -240,13 +261,16 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     expect(parsed.treasury).toBe('steempro.com');
     expect(parsed.feeTokens).toEqual(['SCE']);
     // Fee bootstrap: SCE cannot pay fees before it exists — genesis raises these
-    // via setParam after tokens.create/issue of SCE.
+    // via setParam after tokens.create/issue of SCE. tradeFeeBps arrives via
+    // migration 0006's backfill so the migrated row stays byte-identical to
+    // genesisParam().
     expect(parsed.fees).toEqual({
       nftCreationFee: '0',
       addPropertyFee: '0',
       tokenCreationFee: '0',
       issueFee: '0',
       fillOrderFeeBps: '0',
+      tradeFeeBps: '0',
     });
   });
 
@@ -261,6 +285,8 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await store.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
     await store.put('param', 'TST_param', param());
     await store.put('meta', 'order_seq', '1');
+    await store.put('marketOrder', 'MKT-TST0001', bookOrder('MKT-TST0001', 'tstbob', 'SELL'));
+    await store.put('marketOrder', 'MKT-TST0002', bookOrder('MKT-TST0002', 'tstalice', 'BUY'));
 
     // Same writes through MemoryStore: the two back-ends must be indistinguishable.
     await reference.put('collection', 'TST', collection('TST'));
@@ -271,6 +297,8 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     await reference.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
     await reference.put('param', 'TST_param', param());
     await reference.put('meta', 'order_seq', '1');
+    await reference.put('marketOrder', 'MKT-TST0001', bookOrder('MKT-TST0001', 'tstbob', 'SELL'));
+    await reference.put('marketOrder', 'MKT-TST0002', bookOrder('MKT-TST0002', 'tstalice', 'BUY'));
 
     for (const [entity, key] of [
       ['collection', 'TST'],
@@ -281,6 +309,8 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
       ['balance', 'tstbob:TST'],
       ['param', 'TST_param'],
       ['meta', 'order_seq'],
+      ['marketOrder', 'MKT-TST0001'],
+      ['marketOrder', 'MKT-TST0002'],
     ] as const) {
       expect(await store.get(entity, key)).toEqual(await reference.get(entity, key));
       expect(await store.get(entity, key)).not.toBeNull();
@@ -309,6 +339,8 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
       await target.put('token', 'TSZ', token('TSZ'));
       await target.put('balance', 'tstbob:TST', balance('tstbob', 'TST', '10.500'));
       await target.put('balance', 'tstcarol:TST', balance('tstcarol', 'TST', '1.000'));
+      await target.put('marketOrder', 'MKT-TST0001', bookOrder('MKT-TST0001', 'tstbob', 'SELL'));
+      await target.put('marketOrder', 'MKT-TST0002', bookOrder('MKT-TST0002', 'tstalice', 'BUY'));
     };
     await fixture(store);
     await fixture(reference);
