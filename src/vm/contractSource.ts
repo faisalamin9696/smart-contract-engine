@@ -52,7 +52,7 @@ export const CONTRACT_SOURCE = `
   var MAX_PROP_DEFS = 50;      // engine cap standing in for the wiki's per-property fee
   var MAX_PROPERTY_BYTES = 4096;
   var MAX_METADATA_CHARS = 1000;
-  var MAX_PROP_STRING = 100;
+  var MAX_PROP_STRING = 150;   // string property values (e.g. hosted image URLs)
   var MAX_SAFE = 9007199254740991;
 
   var RE_SYMBOL = /^[A-Z]{3,10}$/;
