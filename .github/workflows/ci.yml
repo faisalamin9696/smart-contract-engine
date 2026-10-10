@@ -32,18 +32,18 @@ jobs:
         env:
           POSTGRES_USER: sce
           POSTGRES_PASSWORD: sce
-          POSTGRES_DB: steemcraft_test
+          POSTGRES_DB: sce_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U sce -d steemcraft_test"
+          --health-cmd "pg_isready -U sce -d sce_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
       # prisma validate resolves env("DATABASE_URL") in the datasource (locally
       # provided by .env); point it at the throwaway DB — validate never connects.
-      DATABASE_URL: postgresql://sce:sce@localhost:5432/steemcraft_test
-      TEST_DATABASE_URL: postgresql://sce:sce@localhost:5432/steemcraft_test
+      DATABASE_URL: postgresql://sce:sce@localhost:5432/sce_test
+      TEST_DATABASE_URL: postgresql://sce:sce@localhost:5432/sce_test
     steps:
       - uses: actions/checkout@v4
 

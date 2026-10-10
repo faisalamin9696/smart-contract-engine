@@ -26,7 +26,7 @@ import { ParamSchema } from '../../src/types/domain';
  * Skipped unless `TEST_DATABASE_URL` points at a *throwaway* database, because the suite
  * applies migrations and writes fixture rows:
  *
- *   $env:TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/steemcraft_test'
+ *   $env:TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/sce_test'
  *   npx jest --runInBand tests/integration/postgresStore.test.ts
  *
  * Every behaviour asserted here is also asserted against MemoryStore in the unit suite, so

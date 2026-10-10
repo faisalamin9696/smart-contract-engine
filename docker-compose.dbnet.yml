@@ -1,5 +1,5 @@
 # Attach the engine to an EXTERNAL Docker network so it can resolve the database
-# hostname (e.g. steemcraft-db-4jwfp1) by its container/service name.
+# hostname (e.g. sce-db-xxxxx) by its container/service name.
 #
 #   DB_NETWORK=<network> docker compose -f docker-compose.yml -f docker-compose.dbnet.yml up -d --build
 #

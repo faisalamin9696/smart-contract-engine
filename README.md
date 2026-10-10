@@ -373,7 +373,7 @@ Optional Postgres parity suite (throwaway database — it applies migrations and
 fixture rows):
 
 ```powershell
-$env:TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/steemcraft_test'
+$env:TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/sce_test'
 npx jest --runInBand tests/integration/postgresStore.test.ts
 ```
 

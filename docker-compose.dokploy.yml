@@ -3,7 +3,7 @@
 #
 #   1. Project → + Service → Compose → type "Docker Compose" → pick your git repo
 #   2. Compose Path:  docker-compose.dokploy.yml
-#   3. Environment tab:  DATABASE_URL=postgresql://user:pass@steemcraft-db-4jwfp1:5432/steemcraft
+#   3. Environment tab:  DATABASE_URL=postgresql://user:pass@sce-db-xxxxx:5432/sce
 #   4. Domains tab:      <api-domain>  → service `engine`, port 4000   (REST + GraphQL)
 #                        <ws-domain>   → service `engine`, port 4001   (WebSocket)
 #   5. Deploy

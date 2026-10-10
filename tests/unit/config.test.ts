@@ -22,9 +22,9 @@ describe('loadConfig storage selection', () => {
 
   test('strips surrounding quotes from a pasted URL', () => {
     const config = loadConfig({
-      DATABASE_URL: "'postgresql://user:secret@db.internal:5432/steemcraft'",
+      DATABASE_URL: "'postgresql://user:secret@db.internal:5432/sce'",
     });
-    expect(config.databaseUrl).toBe('postgresql://user:secret@db.internal:5432/steemcraft');
+    expect(config.databaseUrl).toBe('postgresql://user:secret@db.internal:5432/sce');
   });
 
   test('rejects an explicitly empty DATABASE_URL instead of treating it as unset', () => {
@@ -34,10 +34,10 @@ describe('loadConfig storage selection', () => {
   test('accepts an explicit postgres mode with a URL', () => {
     const config = loadConfig({
       STORAGE: 'postgres',
-      DATABASE_URL: 'postgresql://user:secret@db.internal:5432/steemcraft',
+      DATABASE_URL: 'postgresql://user:secret@db.internal:5432/sce',
     });
     expect(config.storage).toBe('postgres');
-    expect(config.databaseUrl).toBe('postgresql://user:secret@db.internal:5432/steemcraft');
+    expect(config.databaseUrl).toBe('postgresql://user:secret@db.internal:5432/sce');
   });
 
   test('accepts explicit memory mode (tests/demo)', () => {
@@ -47,8 +47,8 @@ describe('loadConfig storage selection', () => {
 
 describe('maskDatabaseUrl', () => {
   test('masks the password but keeps host and database', () => {
-    expect(maskDatabaseUrl('postgresql://user:secret@db.internal:5432/steemcraft')).toBe(
-      'postgresql://user:***@db.internal:5432/steemcraft',
+    expect(maskDatabaseUrl('postgresql://user:secret@db.internal:5432/sce')).toBe(
+      'postgresql://user:***@db.internal:5432/sce',
     );
   });
 

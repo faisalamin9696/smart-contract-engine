@@ -2,19 +2,19 @@
 
 The engine is a stateless HTTP/WS process in front of a PostgreSQL database. This guide
 covers the typical case where the database already exists on the same host/cluster as an
-internal hostname (e.g. `steemcraft-db-4jwfp1:5432`) that only resolves inside that
+internal hostname (e.g. `sce-db-xxxxx:5432`) that only resolves inside that
 environment's DNS/network.
 
 ## 1. Prerequisites
 
 * Docker Engine + Compose v2 on the target host
-* the database reachable from that host, plus a user/database (e.g. `steemcraft`)
+* the database reachable from that host, plus a user/database (e.g. `sce`)
 * outbound HTTPS to your Steem RPC endpoints
 
 ## 2. Copy the project
 
 ```bash
-git clone <repo> steemcraft && cd steemcraft   # or scp/rsync the folder
+git clone <repo> smart-contract-engine && cd smart-contract-engine   # or scp/rsync the folder
 ```
 
 The image builds its own dependencies — do **not** copy `node_modules`.
@@ -28,7 +28,7 @@ cp .env.example .env
 Minimum required:
 
 ```dotenv
-DATABASE_URL=postgresql://steempro:***@steemcraft-db-4jwfp1:5432/steemcraft
+DATABASE_URL=postgresql://steempro:***@sce-db-xxxxx:5432/sce
 ```
 
 `DATABASE_URL` is the only required variable; everything else has a safe default.
@@ -114,7 +114,7 @@ WebSocket smoke test (from any machine that can reach the host):
 
 | Symptom | Cause / fix |
 | --- | --- |
-| `getaddrinfo ENOTFOUND steemcraft-db-4jwfp1` in logs | the engine is not on the DB's network → use `docker-compose.dbnet.yml` with the right `DB_NETWORK`, or point `DATABASE_URL` at a resolvable host |
+| `getaddrinfo ENOTFOUND sce-db-xxxxx` in logs | the engine is not on the DB's network → use `docker-compose.dbnet.yml` with the right `DB_NETWORK`, or point `DATABASE_URL` at a resolvable host |
 | `password authentication failed` | wrong credentials in `.env` (verify with `psql "$DATABASE_URL" -c 'select 1'`) |
 | engine exits immediately with `cannot reach PostgreSQL` | DB down/unreachable, or `DATABASE_URL` missing — see `docker compose logs engine` |
 | `ingestion halted: re-org deeper than the undo buffer` | raise `UNDO_BUFFER_DEPTH` (default 30) and restart; state is never corrupted, it stops instead |

@@ -8,7 +8,7 @@ which
   `RUN_MIGRATIONS=false` to disable),
 * starts the engine (REST :4000, GraphQL, WebSocket :4001),
 * attaches both to Dokploy's shared **`dokploy-network`** — that is what makes the
-  database hostname (e.g. `steemcraft-db-4jwfp1`) resolve *and* lets Traefik reach the
+  database hostname (e.g. `sce-db-xxxxx`) resolve *and* lets Traefik reach the
   engine through the Domains tab.
 
 ## 0. Prerequisites
@@ -32,7 +32,7 @@ which
 Open the service's **Environment** tab and add at least:
 
 ```dotenv
-DATABASE_URL=postgresql://steempro:***@steemcraft-db-4jwfp1:5432/steemcraft
+DATABASE_URL=postgresql://steempro:***@sce-db-xxxxx:5432/sce
 ```
 
 > Keep `DATABASE_URL` in this Environment tab — no default is baked into the compose
@@ -114,7 +114,7 @@ WebSocket: connect to `wss://sce-ws.example.com` and send
 | --- | --- |
 | `/health` reports `"storage":"memory"` | `DATABASE_URL` never reached the container: the Environment tab was empty or not saved. Redeploy with it set — with the shipped `STORAGE=postgres` the deploy now fails fast instead of silently using RAM |
 | `password authentication failed for user …` | wrong credentials in `DATABASE_URL` |
-| `getaddrinfo ENOTFOUND steemcraft-db-…` | the DB is not on `dokploy-network` — recreate it as a Dokploy Postgres service, or check its network with `docker inspect <db> --format '{{json .NetworkSettings.Networks}}'` |
+| `getaddrinfo ENOTFOUND sce-db-…` | the DB is not on `dokploy-network` — recreate it as a Dokploy Postgres service, or check its network with `docker inspect <db> --format '{{json .NetworkSettings.Networks}}'` |
 | `Environment variable not found: DATABASE_URL` from the migration step | the variable is missing in the Environment tab (the compose file fails fast on purpose) |
 | `/api/v1/*` returns 500 with `relation "public."…" does not exist` | the schema was never applied (the engine skips queries it cannot make). Check the logs for `applying database migrations`; otherwise run `docker exec <engine-container> npx prisma migrate deploy` and redeploy |
 | deploy fails with `port is already allocated` | 4000/4001 taken — change `PORT`/`WS_PORT`, or delete the `ports:` block and use Domains only |
@@ -132,4 +132,4 @@ TEST_DATABASE_URL="$DATABASE_URL" npx jest --runInBand tests/integration/postgre
 ```
 
 It applies migrations (idempotent), writes `TST*`/`height ≥ 9_000_001` fixtures and cleans
-them up afterwards — best run against a scratch database (`steemcraft_test`).
+them up afterwards — best run against a scratch database (`sce_test`).
