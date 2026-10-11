@@ -50,7 +50,7 @@ SCE value — the testnet ledger is a different world.
 | WebSocket | `wss://sce-ws.steempro.com` | `wss://sce-test-ws.steempro.com` |
 | Frontend | production build | build with test env (below) |
 | Database | dedicated Postgres | **separate** dedicated Postgres |
-| Genesis | `scripts/genesis.cjs` (done 2026-10-09) | same script, `SCE_OP_ID=sce-testnet1` |
+| Genesis | `scripts/genesis.cjs` (done 2026-10-09) | done — SCE + fee schedule verified on-chain; WSTEEM live (100k bridge inventory) and the full market rehearsal (place → fill → cancel) passed 2026-10-11 via `scripts/market-rehearsal.cjs` |
 
 ## 1. Deploy the testnet engine (Dokploy)
 
