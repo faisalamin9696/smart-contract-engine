@@ -40,6 +40,13 @@ like `SWAP.STEEM` would have needed one; rejected for now).
   invariant `wrapper circulating supply == backing balance` is checkable by
   anyone against the API and the L1 account — transparent, but custodial
   (steempro.com). Disclose this wherever the market UI lives.
+- **Bridge account (decision, 2026-10-11)**: `steempro.funds` — segregated from
+  the admin account `steempro.com` so its L1 balance *is* the backing (no
+  commingling) and the cold bridge key never shares custody with the admin
+  crown-jewel key. Operations, rehearsal drill, backing audit, multisig
+  upgrade and the failure playbook: **[BRIDGE.md](BRIDGE.md)**
+  (`scripts/wsteem.cjs`). The peg-out machinery (burn-then-release) is proven
+  on the live testnet consensus path (2026-10-11).
 - **Deposit**: user sends coins on L1 → bridge verifies → `tokens.issue`.
 - **Withdraw**: user `tokens.transfer`s the wrapper to the bridge → coins
   return on L1 (burn via existing action). Operational SLA, not

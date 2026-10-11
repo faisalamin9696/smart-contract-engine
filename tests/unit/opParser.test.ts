@@ -203,6 +203,44 @@ describe('custom_json block parser', () => {
     expect(ops[4]).toMatchObject({ ok: false, code: 'UNKNOWN_CONTRACT' });
   });
 
+  it('rejects a tokens.burn that smuggles a victim account (bridge safety)', () => {
+    // The peg-out burn may only destroy the SENDER's own wrapper — there is no
+    // recipient param by design. The strict schema closes the param-injection
+    // route too: a payload smuggling a victim (or redirect) key is rejected
+    // before the VM ever runs, so no authority can burn another account's
+    // WSTEEM by decorating the payload.
+    const clean = customJsonTx(
+      { contractName: 'tokens', contractAction: 'burn', contractPayload: { symbol: 'WSTEEM', quantity: '5' } },
+      active('steempro.funds'),
+    );
+    const withVictim = customJsonTx(
+      {
+        contractName: 'tokens',
+        contractAction: 'burn',
+        contractPayload: { symbol: 'WSTEEM', quantity: '5', from: 'victim' },
+      },
+      active('mallory'),
+    );
+    const withRedirect = customJsonTx(
+      {
+        contractName: 'tokens',
+        contractAction: 'burn',
+        contractPayload: { symbol: 'WSTEEM', quantity: '5', to: 'mallory' },
+      },
+      active('mallory'),
+    );
+
+    const block = buildBlock({
+      height: 6,
+      previous: 'f'.repeat(40),
+      transactions: [clean, withVictim, withRedirect],
+    });
+    const { ops } = parseBlock(block, 'sce-mainnet1');
+    expect(ops[0]).toMatchObject({ ok: true, contract: 'tokens', action: 'burn' });
+    expect(ops[1]).toMatchObject({ ok: false, code: 'INVALID_PARAMS' });
+    expect(ops[2]).toMatchObject({ ok: false, code: 'INVALID_PARAMS' });
+  });
+
   it('multiplexes the engine contract (setParam) and validates its payload', () => {
     const valid = customJsonTx(
       { contractName: 'engine', contractAction: 'setParam', contractPayload: { fees: { nftCreationFee: '20' } } },

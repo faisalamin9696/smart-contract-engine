@@ -137,6 +137,39 @@ async function runScenario(provider: SandboxOptions['provider']): Promise<Scenar
     'market',
   );
   await engine.execOk('cancel', { orderId: 'MKT-00000001' }, active('alice'), { ...header, height: 12 }, 'market');
+  // WSTEEM-shaped peg-out legs (docs/BRIDGE.md): the fungible transfer-in to the
+  // bridge and the burn that destroys the wrapper move balances and supply with
+  // BigNumber decimal math — exactly what the bridge settles real custody on.
+  // Both guards (overdraw burn, self-transfer) must fingerprint identically
+  // across providers and replays, like every other leg above.
+  await engine.execOk(
+    'transfer',
+    { symbol: 'GLD', to: 'bob', quantity: '3' },
+    active('alice'),
+    { ...header, height: 13 },
+    'tokens',
+  );
+  await engine.execOk(
+    'burn',
+    { symbol: 'GLD', quantity: '5' },
+    active('alice'),
+    { ...header, height: 14 },
+    'tokens',
+  );
+  await engine.execFail(
+    'burn',
+    { symbol: 'GLD', quantity: '1000000' },
+    active('bob'),
+    { ...header, height: 15 },
+    'tokens',
+  );
+  await engine.execFail(
+    'transfer',
+    { symbol: 'GLD', to: 'alice', quantity: '1' },
+    active('alice'),
+    { ...header, height: 16 },
+    'tokens',
+  );
   await engine.execFail('cancel', { orderId: 'MKT-99999999' }, active('dave'), { ...header, height: 12 }, 'market');
 
   const state = fingerprint(engine.store.dump());

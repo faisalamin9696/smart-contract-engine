@@ -122,7 +122,43 @@ Other useful lanes: `["token:<SYMBOL>"]` (token balance/issue events),
 subscription cap per socket, connection cap per hub — all answered with
 `{ "type": "error", "message": … }` rather than disconnects.
 
-## 4. UI checklist
+## 4. Wrapped-asset flows — deposit & withdraw drawer
+
+WSTEEM is a **custodial 1:1 wrapper** (STEEM backing held on L1 by the bridge
+account `steempro.funds`; ops runbook: [BRIDGE.md](BRIDGE.md)). The UI never
+touches bridge keys — it guides the user and shows balances.
+
+**Deposit (STEEM → WSTEEM), manual in v1:**
+
+1. Drawer instructs: "Send STEEM on Steem to **steempro.funds**, with a memo
+   of your account name" (link to a block explorer).
+2. The operator verifies the L1 receipt and issues WSTEEM to the user; the
+   balance row updates — poll
+   `GET /api/v1/balances?account=<user>&symbol=WSTEEM` or watch the
+   `token:WSTEEM` / `account:<user>` WS lanes.
+
+**Withdraw (WSTEEM → STEEM), manual in v1:**
+
+1. User signs a `tokens.transfer` via Keychain (same custom_json op id as the
+   market ops):
+
+   ```json
+   { "contractName": "tokens", "contractAction": "transfer",
+     "contractPayload": { "symbol": "WSTEEM", "to": "steempro.funds", "quantity": "5" } }
+   ```
+
+2. Show the tx as submitted using the same APPLIED-polling pattern as market
+   ops; the operator then burns the received wrapper and releases STEEM on L1
+   (burn-then-release, so the user can never lose funds mid-flow).
+3. Display a clear "processed manually — expect STEEM within the SLA" notice;
+   v1 has no automatic release.
+
+**Disclosure copy** (required wherever deposit/withdraw lives): WSTEEM is a
+custodial wrapper operated by steempro.com — every WSTEEM is backed 1:1 by
+STEEM held on-chain by `steempro.funds` (anyone can verify: engine supply vs
+the account balance), but redemption depends on the bridge operator.
+
+## 5. UI checklist
 
 * Optimistic placement is safe **only after** the Keychain signature
   confirms; then poll the tx (or WS) for `APPLIED` before showing the order
