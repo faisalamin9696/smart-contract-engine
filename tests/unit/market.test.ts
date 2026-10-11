@@ -256,6 +256,103 @@ describe('market contract (fungible order book)', () => {
     expect((await engine.balance('bob', 'AAA'))?.quantity).toBe('1012');
   });
 
+  it('never crosses orders from a different quote of the same base', async () => {
+    await engine.execOk(
+      'create',
+      { symbol: 'CCC', name: 'Gamma', precision: 2 },
+      active('issuer'),
+      next(),
+      'tokens',
+    );
+    await engine.execOk(
+      'issue',
+      { symbol: 'CCC', to: 'bob', quantity: '1000' },
+      active('issuer'),
+      next(),
+      'tokens',
+    );
+
+    // Resting sell of AAA priced in BBB...
+    await engine.execOk(
+      'sell',
+      { symbol: 'AAA', quote: 'BBB', quantity: '5', price: '2' },
+      active('alice'),
+      next(),
+      'market',
+    );
+    // ...and a crossing-priced buy of the same base denominated in CCC: a different
+    // quote means a different market — it must not touch the AAA/BBB book.
+    const outcome = await engine.execOk(
+      'buy',
+      { symbol: 'AAA', quote: 'CCC', quantity: '5', price: '2' },
+      active('bob'),
+      next(),
+      'market',
+    );
+
+    expect(await engine.bookOrder('MKT-00000001')).toMatchObject({ status: 'OPEN', filled: '0' });
+    expect(await engine.bookOrder('MKT-00000002')).toMatchObject({
+      status: 'OPEN',
+      side: 'BUY',
+      quote: 'CCC',
+      filled: '0',
+    });
+    expect(outcome.events.some((e) => e.type === 'MARKET_FILLED')).toBe(false);
+    // Each side escrowed its own currency and nothing settled: 5 AAA from alice,
+    // 10 CCC from bob, bob's BBB untouched.
+    expect((await engine.balance('alice', 'AAA'))?.quantity).toBe('995');
+    expect((await engine.balance('bob', 'CCC'))?.quantity).toBe('990');
+    expect((await engine.balance('bob', 'BBB'))?.quantity).toBe('1000');
+  });
+
+  it('stops matching at the 25-fills-per-op cap and rests the remainder', async () => {
+    // 26 crossing resting sells; the taker wants far more than the book can fill.
+    for (let i = 0; i < 26; i += 1) {
+      await engine.execOk(
+        'sell',
+        { symbol: 'AAA', quote: 'BBB', quantity: '1', price: '2' },
+        active('alice'),
+        next(),
+        'market',
+      );
+    }
+
+    const outcome = await engine.execOk(
+      'buy',
+      { symbol: 'AAA', quote: 'BBB', quantity: '100', price: '2' },
+      active('bob'),
+      next(),
+      'market',
+    );
+
+    // Exactly MAX_FILLS_PER_OP fills happen; the 26th maker is never reached.
+    expect(outcome.events.filter((e) => e.type === 'MARKET_FILLED')).toHaveLength(25);
+    for (let i = 1; i <= 25; i += 1) {
+      expect(await engine.bookOrder(`MKT-${String(i).padStart(8, '0')}`)).toMatchObject({
+        status: 'FILLED',
+        filled: '1',
+        escrow: '0',
+      });
+    }
+    expect(await engine.bookOrder('MKT-00000026')).toMatchObject({ status: 'OPEN', quantity: '1', filled: '0' });
+
+    // The taker rests with the remainder: 100 - 25 = 75, escrow 200 - 50 = 150.
+    expect(await engine.bookOrder('MKT-00000027')).toMatchObject({
+      status: 'OPEN',
+      quantity: '75',
+      filled: '25',
+      escrow: '150',
+    });
+
+    // Exact escrow accounting under the cap: bob paid 200 into escrow up front and
+    // received 25 AAA; alice released 25 AAA (1 stays escrowed on maker 26) and
+    // earned 25 x 2 BBB.
+    expect((await engine.balance('bob', 'AAA'))?.quantity).toBe('1025');
+    expect((await engine.balance('bob', 'BBB'))?.quantity).toBe('800');
+    expect((await engine.balance('alice', 'AAA'))?.quantity).toBe('974');
+    expect((await engine.balance('alice', 'BBB'))?.quantity).toBe('50');
+  });
+
   /* --------------------------------------------------------------- cancel */
 
   it('cancels an open order and refunds the escrow (owner only, once)', async () => {
