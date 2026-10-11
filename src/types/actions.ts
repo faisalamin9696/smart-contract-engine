@@ -579,7 +579,12 @@ export function parseEnvelope(rawJson: string): Envelope {
     throw new PayloadError('INVALID_ENVELOPE', 'action (or contractAction) must be a string');
   }
 
-  const hint = UNSUPPORTED_ACTION_HINTS[action];
+  // Own-property lookup: a bare `HINTS[action]` would resolve inherited names like
+  // `toString`/`constructor` through the prototype chain (fail-closed, but with a
+  // nonsense hint) — hostile action strings must only ever match real hint keys.
+  const hint = Object.prototype.hasOwnProperty.call(UNSUPPORTED_ACTION_HINTS, action)
+    ? UNSUPPORTED_ACTION_HINTS[action]
+    : undefined;
   if (hint !== undefined) {
     throw new PayloadError('ACTION_UNSUPPORTED', `action "${action}" is unsupported: ${hint}`);
   }

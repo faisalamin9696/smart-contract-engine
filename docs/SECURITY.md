@@ -67,8 +67,42 @@ rejects, and a failed op never aborts the block.
 No floats, frozen BigNumber config on both sides of the sandbox, no host APIs or clock
 in the guest (timestamps come from block headers), blocked globals, `codeGeneration`
 disabled, hard time/memory limits. `isolated-vm` is preferred; the `node-vm` fallback
-runs the identical first-party contract bytes in a locked-down context and is now
-announced loudly at boot instead of degrading silently (`SANDBOX_PROVIDER` pins it).
+runs the identical first-party contract bytes in a locked-down context, is announced
+loudly at boot, and in production the boot **stops** rather than degrade to it (see
+below). `SANDBOX_PROVIDER` pins the level explicitly.
+
+#### Sandbox provider contract: no silent downgrade
+
+`isolated-vm` is a **native addon** and a **hard dependency** — production refuses
+to boot without it (layer 3 below). While 6.x compiled from source, it lived in
+`optionalDependencies` so a contributor machine without a compiler could still
+`npm ci` and run the suite on `node-vm`; **7.x ships prebuilt binaries for every
+platform we use** (win32/linux/darwin × x64/arm64 × glibc/musl, Node 24 and 26
+ABIs), so that era is over and a failed install is fatal again. npm proving the
+package *installed* is still not the same as the addon *loading* inside the shipped
+image, so three layers turn any gap into a loud failure:
+
+1. **Version floor** — Node `>=24` (`engines`, Docker base, CI) matches
+   `isolated-vm@^7.0.1`'s own `engines: >=24` requirement. Current pin: **7.0.1**
+   (7.x line, security fix for the Aug-2026 ExternalCopy type-confusion escape; its
+   6.x backport was 6.2.0 — the version previously pinned here). The Node↔addon
+   matrix per upstream: 7.x ↔ Node ≥ 24; below the floor npm has only source builds
+   to fall back on and the install fails loudly instead of silently omitting the
+   addon.
+2. **Build-time** — `node -e "require('isolated-vm')"` runs in CI right after `npm ci`
+   and in *both* Docker stages (build stage: the compile succeeded; runtime stage: the
+   addon loads against the runtime ABI). A red assertion beats a reduced isolation
+   level discovered in production.
+3. **Boot-time** — under `NODE_ENV=production` the engine refuses to start when the
+   live provider is not `isolated-vm` (`assertProductionSandbox`, `src/vm/sandbox.ts`),
+   the same "no silent fallback" rule that already governs `STORAGE`/`DATABASE_URL`.
+   The one deliberate escape hatch is an explicit `SANDBOX_PROVIDER=node-vm`.
+
+The live level is always observable: `GET /api/v1/status` → `sandbox` (also in
+GraphQL `status.sandbox`). The threat this guards against is not user code — no
+user-supplied JavaScript ever reaches the isolate (fixed first-party contract bytes,
+JSON params validated before execution) — but the operational failure mode where a
+broken toolchain silently halves the containment around the engine process.
 
 ### 5. RPC trust: quorum verification + linkage + re-org
 
@@ -182,16 +216,38 @@ SSH/Dokploy access, and the official domain.
 
 ## Known dependency advisories (audited, explained, tracked)
 
-`npm audit` runs before releases; CI gates at `--audit-level=critical`. The
+Two independent gates watch this tree: `npm audit` (production-only, CI gates at
+`--audit-level=critical`) and **OSV-Scanner** (full lockfile, see below). The
 residual advisories are all off the runtime API path:
 
 | Advisory | Severity | Why it is acceptable here |
 | --- | --- | --- |
-| `deepmerge-ts` via prisma CLI (`@prisma/config`) | high | CLI config-file merging over **our own** trusted config — never reachable from API input; no stable upstream fix yet; the runtime query client does not use it |
-| `elliptic` / `secp256k1` via `@steempro/dsteem` | low | **devDependencies only** — one-off `scripts/genesis.cjs` broadcasts; the production image omits it entirely (runtime transport is first-party fetch, `src/chain/rpc.ts`) |
-| jest coverage chain (`js-yaml`, `sprintf-js`, `babel-plugin-istanbul`, `braces`) | moderate | test-time tooling only — no shipped or reachable runtime code path |
+| `GHSA-ggr8-5vv4-36mx` — `deepmerge-ts` via prisma CLI (`@prisma/config`) | high | CLI config-file merging over **our own** trusted config — never reachable from API input; fixed only by a major transitive bump that risks the migration tooling; the runtime query client does not use it |
+| `GHSA-848j-6mx2-7j84` (CVE-2025-14505) — `elliptic` / `secp256k1` via `@steempro/dsteem` | medium | **devDependencies only** — one-off `scripts/genesis.cjs` broadcasts; the engine runtime never signs (transactions are signed client-side via Keychain, consensus authorities arrive pre-verified from the chain); no upstream fix exists for ≤ 6.6.1; the production image omits it entirely (runtime transport is first-party fetch, `src/chain/rpc.ts`) |
+| `GHSA-hp3w-g68c-fv3c` — jest coverage chain (`sprintf-js` via `js-yaml@3`) | moderate | test-time tooling only — the DoS shape needs attacker-controlled format strings, and format strings here are developer-written source; no shipped or reachable runtime code path |
 
-Local check: `npm audit --omit=dev` (production-only view).
+Local checks: `npm audit --omit=dev` (production-only view) and
+`osv-scanner scan --lockfile package-lock.json`.
+
+### Supply-chain scanning (CI gate)
+
+Every push runs a pinned **OSV-Scanner v2.6.0** binary against
+`package-lock.json`. The binary is downloaded from the Google release (SLSA3),
+its SHA256 is checked against the published `SHA256SUMS`, and any vulnerability
+**not** baselined in `./osv-scanner.toml` fails CI before the test steps run.
+Each baseline entry carries a written reason and a re-evaluation trigger — the
+file documents the rules for adding more.
+
+OSV.dev aggregates the GitHub Advisory Database on top of npm's feed, so it
+catches advisories npm has not yet reported (the exact lag the Aug-2026
+isolated-vm advisory demonstrated). Complementing it, **Dependabot version
+updates** (`.github/dependabot.yml`) propose weekly PRs for npm and GitHub
+Actions — every PR must pass the full CI gate — and **Dependabot alerts**
+(repo setting, free for private repositories) email the moment a new advisory
+lands on any dependency, even when no code has been pushed.
+
+No scanner finds first-party bugs: that side is the 278-test suite (sandbox,
+ingress fuzzing, hostile-mutation corpus, WS abuse) in `tests/unit`.
 
 ## Reporting
 

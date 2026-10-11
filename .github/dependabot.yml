@@ -1,0 +1,21 @@
+# Dependabot: proposes dependency upgrades as PRs (npm packages + GitHub
+# Actions versions). Security *alerts* are a separate repo setting
+# (Settings -> Code security -> Dependabot alerts; free for private repos) and
+# work regardless of this file.
+#
+# Every PR still has to pass the full CI gate before merging, and prisma is
+# pinned by policy (docs/SECURITY.md) - review prisma-related PRs deliberately,
+# they move the tooling advisory baseline in osv-scanner.toml.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

@@ -87,6 +87,10 @@ const BLOCKED_GLOBALS = [
   'require',
   'process',
   'Buffer',
+  // Node injects its own host-realm `console` into vm contexts; isolated-vm contexts
+  // carry one too. The contract never logs, and a host-bound console would be both
+  // an escape surface (host function objects in the guest) and a log-spam vector.
+  'console',
   'WebAssembly',
   'SharedArrayBuffer',
   'Atomics',
@@ -290,4 +294,31 @@ export async function createSandbox(options: SandboxOptions): Promise<Sandbox> {
     }
   }
   return new NodeVmSandbox(source, { ...options, bootstrapTimeoutMs });
+}
+
+/**
+ * Production isolation gate (docs/SECURITY.md → "Sandbox provider contract").
+ *
+ * The native isolate is a hard dependency, and `provider: 'auto'` must never quietly
+ * boot the unhardened `node-vm` fallback: an install path that skipped or broke the
+ * addon (`--omit=optional` on older layouts, a failed prebuild, a stripped image)
+ * would otherwise serve with reduced containment. In production that downgrade must
+ * stop the engine instead of serving: the same "no silent fallback" rule the boot
+ * already applies to STORAGE/DATABASE_URL (src/index.ts).
+ *
+ * The one deliberate escape hatch stays available: an explicit
+ * `SANDBOX_PROVIDER=node-vm` documents a conscious choice to run unhardened.
+ */
+export function assertProductionSandbox(
+  configured: SandboxOptions['provider'],
+  actual: string,
+): void {
+  if (configured === 'node-vm') return; // explicit opt-out — logged at boot
+  if (actual === 'isolated-vm') return;
+  throw new Error(
+    `production requires the isolated-vm sandbox but the live provider is "${actual}" — ` +
+      'the native addon is missing or failed to load (check the image/install produced ' +
+      'node_modules with it, and the Node version, or set SANDBOX_PROVIDER=node-vm to ' +
+      'accept the unhardened fallback explicitly)',
+  );
 }

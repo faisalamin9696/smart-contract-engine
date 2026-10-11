@@ -8,7 +8,7 @@ import { Indexer } from './indexer/indexer';
 import { ConsoleLogger, type Logger } from './logger';
 import { MemoryStore } from './state/memoryStore';
 import type { EngineStore } from './state/store';
-import { createSandbox, type Sandbox } from './vm/sandbox';
+import { assertProductionSandbox, createSandbox, type Sandbox } from './vm/sandbox';
 import { maskDatabaseUrl } from './utils/redact';
 
 type Storage = 'postgres' | 'memory';
@@ -57,6 +57,12 @@ async function main(): Promise<void> {
     memoryLimitMb: config.sandboxMemoryLimitMb,
     logger,
   });
+  // Production has no silent fallback (same rule as STORAGE/DATABASE_URL): if the
+  // native addon did not load, stop the boot rather than serve with the unhardened
+  // node-vm provider (docs/SECURITY.md → "Sandbox provider contract").
+  if (process.env.NODE_ENV === 'production') {
+    assertProductionSandbox(config.sandboxProvider, sandbox.provider);
+  }
   logger.info('contract sandbox ready', { provider: sandbox.provider });
 
   const bus = new EngineEventBus();

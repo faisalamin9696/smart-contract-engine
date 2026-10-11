@@ -96,6 +96,48 @@ async function runScenario(provider: SandboxOptions['provider']): Promise<Scenar
     active('mallory'),
     { ...header, height: 9 },
   );
+  // fungible market: rest a sell, cross it with a partial buy, cancel the
+  // remainder, and record a failing market op. The BigNumber escrow math, ceil
+  // rounding, price-time ordering and fee routing are the most complex numeric
+  // surface in the contract — they must fingerprint identically across providers
+  // and repeated runs, exactly like the NFT path above.
+  await engine.execOk(
+    'create',
+    { symbol: 'GLD', name: 'Gold', precision: 2 },
+    active('alice'),
+    { ...header, height: 10 },
+    'tokens',
+  );
+  await engine.execOk(
+    'issue',
+    { symbol: 'GLD', to: 'alice', quantity: '100' },
+    active('alice'),
+    { ...header, height: 10 },
+    'tokens',
+  );
+  await engine.execOk(
+    'issue',
+    { symbol: 'SCE', to: 'bob', quantity: '50' },
+    active('alice'),
+    { ...header, height: 10 },
+    'tokens',
+  );
+  await engine.execOk(
+    'sell',
+    { symbol: 'GLD', quote: 'SCE', quantity: '10', price: '2' },
+    active('alice'),
+    { ...header, height: 11 },
+    'market',
+  );
+  await engine.execOk(
+    'buy',
+    { symbol: 'GLD', quote: 'SCE', quantity: '4', price: '2' },
+    active('bob'),
+    { ...header, height: 11 },
+    'market',
+  );
+  await engine.execOk('cancel', { orderId: 'MKT-00000001' }, active('alice'), { ...header, height: 12 }, 'market');
+  await engine.execFail('cancel', { orderId: 'MKT-99999999' }, active('dave'), { ...header, height: 12 }, 'market');
 
   const state = fingerprint(engine.store.dump());
   const mutations = fingerprint(engine.outcomes.map((o) => o.log.mutations));

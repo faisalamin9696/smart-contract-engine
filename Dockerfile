@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 # ---- build stage: compiles the engine and the Prisma client -------------------
-FROM node:22-bookworm-slim AS build
+# Node 24 is the floor: isolated-vm@7 declares engines >=24 (docs/SECURITY.md →
+# "Sandbox provider contract"); both stages must share one ABI so the native addon
+# compiled here also loads in the runtime stage.
+FROM node:24-bookworm-slim AS build
 
 # isolated-vm is a native addon — toolchain is only needed while building.
 RUN apt-get update \
@@ -11,6 +14,10 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci
+# isolated-vm ships prebuilt binaries (Node 24 ABI), but an image whose npm ci lost
+# the addon would only fail later at runtime. Assert it exists and loads — a red
+# image build beats a silently downgraded sandbox (docs/SECURITY.md).
+RUN node -e "require('isolated-vm')"
 
 COPY tsconfig.json ./
 COPY prisma ./prisma
@@ -20,7 +27,7 @@ RUN npx prisma generate
 RUN npm run build
 
 # ---- runtime stage ------------------------------------------------------------
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 
 # OpenSSL must exist in the runtime, not just the build stage: Prisma detects its
 # platform by running `openssl version`. Without the CLI it mis-detects
@@ -45,6 +52,9 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
+# Second assertion of the addon, in the runtime environment: it not only shipped
+# but loads against this stage's ABI (the lost-addon failure mode, end to end).
+RUN node -e "require('isolated-vm')"
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 # .gitattributes pins the script to LF, but a CRLF checkout would silently break the
 # interpreter — normalise again at build time so the image is correct either way.

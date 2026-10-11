@@ -49,11 +49,32 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      # isolated-vm ships prebuilt binaries, but an npm ci that lost the addon (an
+      # omit flag, a failed prebuild resolution) would otherwise be silent and the
+      # suite would then test only the node-vm fallback. Prove the hardened isolate
+      # is actually present (docs/SECURITY.md → "Sandbox provider contract").
+      - name: Verify isolated-vm addon built
+        run: node -e "require('isolated-vm')"
+
+      # Independent supply-chain scan against Google's OSV.dev database, which
+      # aggregates GHSA + npm feeds — cross-checking what `npm audit` alone can
+      # lag on (the Aug-2026 isolated-vm advisory existed as a GHSA before npm
+      # reported it). Version-pinned and SLSA3-published; the checksum from the
+      # release SHA256SUMS is verified before use. Known dev-only advisories are
+      # baselined with reasons in ./osv-scanner.toml — anything new fails here,
+      # before the slower test steps (docs/SECURITY.md -> "Supply-chain scanning").
+      - name: Supply-chain scan (OSV-Scanner)
+        run: |
+          curl -fsSL -o /tmp/osv-scanner "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64"
+          curl -fsSL -o /tmp/SHA256SUMS "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_SHA256SUMS"
+          grep 'osv-scanner_linux_amd64$' /tmp/SHA256SUMS | sed 's|  osv-scanner_linux_amd64$|  /tmp/osv-scanner|' | sha256sum --check
+          /tmp/osv-scanner scan --lockfile package-lock.json
 
       - name: Generate Prisma client
         run: npx prisma generate

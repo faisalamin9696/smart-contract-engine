@@ -94,6 +94,11 @@ const marketBuyTx = customJsonTx(
   { contract: 'market', action: 'buy', params: { symbol: 'GLD', quote: 'SCE', quantity: '4', price: '2' } },
   active('bob'),
 );
+// the frontend cancel button: cancels alice's sell remainder (10 rested, 4 filled)
+const marketCancelTx = customJsonTx(
+  { contract: 'market', action: 'cancel', params: { orderId: 'MKT-00000001' } },
+  active('alice'),
+);
 
 /* ------------------------------------------------------------ tiny ws client */
 
@@ -702,5 +707,40 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     );
 
     await client.close();
+  });
+
+  it('cancels the resting sell through the chain and updates row, book, balances and the market lane', async () => {
+    // The frontend cancel button, end to end: a Keychain-signed cancel op replays
+    // through the real path (chain -> indexer -> VM -> guard -> projections) and
+    // must surface everywhere a trading UI looks — order row, open-order list,
+    // depth ladder, balances and the `market` WS lane. Deliberately last: the
+    // tests above assert the resting OPEN sell this cancels.
+    rpc.mine({ transactions: [marketCancelTx] });
+    await indexer.catchUp();
+    await waitFor(() => marketWatcher.events('MARKET_CANCELLED').length > 0, 'market cancel event');
+
+    const cancel = marketWatcher.events('MARKET_CANCELLED')[0];
+    expect(cancel).toMatchObject({
+      account: 'alice',
+      symbol: 'GLD',
+      data: { orderId: 'MKT-00000001', side: 'SELL', quote: 'SCE', refunded: '6', filled: '4' },
+    });
+
+    const row = await getJson(`${base}/api/v1/market/orders/MKT-00000001`);
+    expect(row.data).toMatchObject({ status: 'CANCELLED', quantity: '0', escrow: '0', filled: '4' });
+
+    const open = await getJson(`${base}/api/v1/market/orders?status=OPEN&symbol=GLD`);
+    expect(open.data).toHaveLength(0);
+    expect(open.meta.total).toBe(0);
+
+    const depth = await getJson(`${base}/api/v1/market/book?symbol=GLD&quote=SCE`);
+    expect(depth.data).toEqual({ bids: [], asks: [] });
+
+    // escrow refund: 100 GLD - 10 placed + 6 refunded = 96; the 8 SCE proceeds of
+    // the earlier fill stay with alice (tradeFeeBps defaults to 0).
+    const gld = await getJson(`${base}/api/v1/balances?account=alice&symbol=GLD`);
+    expect(gld.data[0]).toMatchObject({ account: 'alice', symbol: 'GLD', quantity: '96' });
+    const sce = await getJson(`${base}/api/v1/balances?account=alice&symbol=SCE`);
+    expect(sce.data[0]).toMatchObject({ quantity: '8' });
   });
 });
