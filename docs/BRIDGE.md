@@ -15,40 +15,56 @@ The bridge account currently runs single-signature; for real custody volume,
 upgrade its active authority to a **threshold (multisig) setup** — Steem
 supports 2-of-N active authorities natively.
 
-### Multisig upgrade (recommended before mainnet launch)
+### Multisig upgrade (script-driven; recommended before the backing gets size)
 
-1. Collect the public parts of the new keys (reuse existing cold keys or
-   generate fresh ones):
+`scripts/bridge-multisig.cjs` flips `steempro.funds` from 1-of-1 into a
+**2-of-3 threshold on BOTH the owner and active authorities** — one stolen
+key then moves nothing, one lost key doesn't brick the account. Doing it now,
+while the balance is 0.000, carries zero transition risk.
 
-   ```js
-   const { PrivateKey } = require('@steempro/dsteem');
-   console.log(PrivateKey.fromString('5K...').createPublic().toString());
+1. **Preview** (broadcasts nothing, prints no private material):
+
+   ```powershell
+   node scripts/bridge-multisig.cjs
    ```
 
-2. Broadcast an `account_update` **signed with the current owner key** that
-   replaces the active authority with a threshold of those pubkeys, e.g. 2-of-3:
+2. **Apply** — needs the **current OWNER key** of the bridge (different from
+   the active key used for daily ops). The target is named **explicitly on the
+   command line** (`--apply` deliberately ignores `BRIDGE_ACCOUNT` env so a
+   stale env var can never retarget an authority flip). The script pre-flights
+   the key against the live owner authority, generates 3 fresh keys (**each
+   WIF is printed exactly once — save them immediately in three separate
+   secure places**), broadcasts the `account_update`, and re-reads the account
+   to verify both authorities landed:
 
-   ```json
-   {
-     "account": "steempro.funds",
-     "owner": {
-       "weight_threshold": 2,
-       "account_auths": [],
-       "key_auths": [["STM...key1", 1], ["STM...key2", 1], ["STM...key3", 1]]
-     },
-     "active": { "weight_threshold": 2, "account_auths": [], "key_auths": [["STM...key1", 1], ["STM...key2", 1], ["STM...key3", 1]] },
-     "posting": "<copy unchanged from the live account>",
-     "memo_key": "<copy unchanged>",
-     "json_metadata": ""
-   }
+   ```powershell
+   $env:STEEM_OWNER_WIF='5K...'      # OWNER key of steempro.funds
+   node scripts/bridge-multisig.cjs --apply --account steempro.funds
    ```
 
-3. Verify a small signed op with the new setup before moving size; only then
-   consider the old single key burned. Keep offline copies of **all** private
-   keys — losing 2-of-3 loses the backing permanently.
+3. **Smoke-test the live threshold** — a real threshold-signed op proves the
+   setup end to end: a balance-neutral 0.001 STEEM self-transfer when the
+   account holds funds, or (at 0.000 balance) a funds-free `custom_json`
+   probe — the exact op shape every bridge op uses:
 
-I can prepare the exact broadcast (posting/memo filled from the live account)
-on request; the signing stays on your side with the current owner key.
+   ```powershell
+   $env:BRIDGE_SIGN_KEYS='wif1 wif2'
+   node scripts/bridge-multisig.cjs --test
+   ```
+
+4. Afterwards, every bridge op needs two active keys — `wsteem.cjs` accepts
+   them space-separated and its pre-flight verifies the combined weight meets
+   the threshold before anything is signed:
+
+   ```powershell
+   $env:STEEM_ACTIVE_WIF='wif1 wif2'
+   node scripts/wsteem.cjs --reconcile
+   ```
+
+The old single owner/active keys lose **all** authority the moment the update
+applies — retire them. Keep offline copies of all three private keys: losing
+2-of-3 permanently bricks access to the backing. The update takes effect
+immediately (owner-signed operations from that point on).
 
 **Disclosure** (carry wherever the market UI lives, including the Portal):
 WSTEEM is a custodial wrapper — every WSTEEM is backed 1:1 by STEEM held on
@@ -113,10 +129,90 @@ Never issue before the L1 funds are visible; the script's per-step engine
 confirmation makes a half-run safe (nothing is idempotency-destructive: a
 re-run after a crash re-checks state first — verify balances before retrying).
 
-## Peg-out (WSTEEM → user STEEM)
+### Automating the bridge (`--pending` / `--watch`)
+
+The engine cannot see L1, so detection runs off-chain in the ops script —
+never inside a contract. Two modes share the detectors:
+
+```powershell
+node scripts/wsteem.cjs --pending   # read-only: unissued deposits + queued peg-outs + exact commands
+node scripts/wsteem.cjs --watch     # daemon: both directions, automatic
+```
+
+**Deposit side.** The detector reads **state first** (L1 balance − supply =
+unbacked excess, immune to history-plugin lag), then attributes excess to
+post-genesis transfers-in FIFO-paired against applied issues. A deposit is
+auto-issuable only if its memo is *exactly* an existing L1 account name (the
+naming convention in step 1 becomes mandatory for hands-free credit).
+Anything else — empty/odd memo, unknown account — is flagged for manual
+handling, never guessed.
+
+**Peg-out side.** Bridge on-engine balance (state) with FIFO-paired burns
+consumed = queued peg-outs. Each one is released through the shared
+burn-then-release core to the **signed op's sender** — never the memo: a memo
+is user-chosen text and must not be able to redirect real L1 funds. Manual
+`--withdraw` uses the same machinery and stays available; the cover checks
+make a double-release attempt abort before broadcast.
+
+`--watch` needs `STEEM_ACTIVE_WIF` (the bridge's 2-of-3) in its environment,
+acts at most **once per tick**, remembers consumed deposit indices and engine
+heights for the session (a re-scan can never act twice), and **stops with
+exit 1** on: shortfall (supply > backing), pending sums exceeding the excess
+(double-issue risk), state/logs disagreement (held inventory with no inbound
+pair, more burns than inbound), releases exceeding the bridge's L1 balance,
+or backing that stays unattributed for `WATCH_LAG_TICKS` ticks (default 20 ×
+`WATCH_INTERVAL`s ≈ 10 min — the usual cause is non-deposit credits, see the
+rewards note below). `WATCH_INTERVAL` (seconds, default 30) tunes the poll.
+
+> **Rewards note:** `steempro.funds` accrues curation/author rewards as liquid
+> STEEM — that raises L1 balance without any deposit, so `--audit` check `b`
+> fails and the watcher stops (by design). Sweep stray credits out
+> (`transfer` to the admin account) to restore exact equality.
+
+### Running on a server (Dokploy)
+
+For 24/7 credit, deploy the watcher as its own service (`docker-compose.watcher.yml`
++ `watcher/Dockerfile`, both in this repo):
+
+1. Dokploy → + Service → Compose → this repo → Compose Path:
+   `docker-compose.watcher.yml`.
+2. Environment tab: `STEEM_ACTIVE_WIF` = **two** bridge WIFs, space-separated
+   (satisfies the account's 2-of-3 active threshold). Everything else has
+   working defaults in the file (account, op id, endpoints, intervals).
+3. Deploy — no Domains tab entry: the service is outbound-only (engine REST +
+   Steem RPC) and exposes no port.
+
+Rules that come with it:
+
+* **Exactly one watcher, anywhere.** The PID lock only excludes a second
+  process *on the same host* — a local `--watch` and the server watcher would
+  both see the same deposit and could double-issue before the other's tick.
+  Deploying the server service means disabling the local scheduled task, and
+  vice versa.
+* **Threat model:** this Compose project's Environment tab now holds threshold
+  key material — treat it accordingly. The third WIF is never uploaded and the
+  engine service stays keyless; never merge the two services.
+* **STOP means stop.** Anomaly exits are deliberate, and both restart switches
+  keep the container dead (`restart: "no"` + Swarm `restart_policy: none` —
+  Dokploy deploys compose as a Swarm stack that would otherwise restart
+  forever). A stopped service in Dokploy **is** the alert: read its logs, work
+  the failure playbook, then restart — and check the service after any host
+  reboot, because `none` means it will not resurrect itself.
+* **Stateless restarts:** consumed sets are rebuilt from state + logs on every
+  start, so a restart can never re-issue a credited deposit or re-release a
+  burned peg-out. Logs are stdout (Dokploy's log viewer), one heartbeat line
+  per tick.
+* `--reconcile` / `--audit` stay keyless and read-only — run them from any
+  cron (server included) as the always-on tripwire.
 
 1. User engine-transfers WSTEEM to `steempro.funds` (the Portal's withdraw
-   drawer does this via Keychain).
+   drawer does this via Keychain; CLI fallback for holders without the Portal):
+
+   ```powershell
+   $env:BRIDGE_ACCOUNT='<holder>'          # e.g. steempro.com
+   $env:STEEM_ACTIVE_WIF='<holder active>' # single key — holder signs their own transfer
+   node scripts/wsteem.cjs --transfer <qty> --to steempro.funds
+   ```
 2. Operator runs:
 
 ```powershell

@@ -66,7 +66,7 @@ jobs:
       # aggregates GHSA + npm feeds — cross-checking what `npm audit` alone can
       # lag on (the Aug-2026 isolated-vm advisory existed as a GHSA before npm
       # reported it). Version-pinned and SLSA3-published; the checksum from the
-      # release SHA256SUMS is verified before use. Known dev-only advisories are
+      # release SHA256SUMS is verified before use. Known advisories are
       # baselined with reasons in ./osv-scanner.toml — anything new fails here,
       # before the slower test steps (docs/SECURITY.md -> "Supply-chain scanning").
       - name: Supply-chain scan (OSV-Scanner)
@@ -76,6 +76,10 @@ jobs:
           grep 'osv-scanner_linux_amd64$' /tmp/SHA256SUMS | sed 's|  osv-scanner_linux_amd64$|  /tmp/osv-scanner|' | sha256sum --check
           chmod +x /tmp/osv-scanner
           /tmp/osv-scanner scan --lockfile package-lock.json
+          # The watcher carries its own lockfile — the PRODUCTION signer tree that
+          # runs in the server image — so it gets its own scan under the same
+          # ./osv-scanner.toml baseline (loaded from the working directory).
+          /tmp/osv-scanner scan --lockfile watcher/package-lock.json
 
       - name: Generate Prisma client
         run: npx prisma generate
@@ -94,7 +98,7 @@ jobs:
 
       - name: Compose files parse
         run: |
-          for f in docker-compose.yml docker-compose.dokploy.yml docker-compose.dbnet.yml docker-compose.local-db.yml; do
+          for f in docker-compose.yml docker-compose.dbnet.yml docker-compose.local-db.yml docker-compose.watcher.yml; do
             npx js-yaml "$f" > /dev/null && echo "ok: $f"
           done
 

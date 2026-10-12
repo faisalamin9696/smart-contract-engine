@@ -32,7 +32,7 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 **Guides:** [Run your own node](docs/NODE-OPERATOR.md) ·
 [Security & threat model](docs/SECURITY.md) ·
 [Testnet](docs/TESTNET.md) ·
-[Deployment](docs/DEPLOYMENT.md) · [Dokploy](docs/DOKPLOY.md) ·
+[Deployment](docs/DEPLOYMENT.md) ·
 [Tokens design](docs/TOKENS-DESIGN.md) · [Market design](docs/MARKET-DESIGN.md) · [Contributing](CONTRIBUTING.md) ·
 [License](LICENSE) (MIT)
 
@@ -91,16 +91,6 @@ The image's entrypoint applies `npx prisma migrate deploy` before the engine sta
 (retrying for ~2.5 minutes while the database boots), so no deploy tool can skip
 migrations. Full server instructions (network discovery, verification, upgrades,
 troubleshooting) are in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
-
-### 4. Deploying on Dokploy
-
-```bash
-# Compose Path in the Dokploy service:
-docker-compose.dokploy.yml
-```
-
-It attaches everything to Dokploy's shared `dokploy-network` (so the database hostname
-resolves and Traefik can reach the engine). Step-by-step: **[docs/DOKPLOY.md](docs/DOKPLOY.md)**.
 
 ## API
 

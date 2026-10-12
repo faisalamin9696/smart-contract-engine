@@ -1,6 +1,7 @@
-# Known-vulnerability baseline for OSV-Scanner (CI scans package-lock.json on
-# every push with a pinned, checksum-verified binary — see ci.yml "Supply-chain
-# scan" and docs/SECURITY.md -> "Supply-chain scanning").
+# Known-vulnerability baseline for OSV-Scanner (CI scans every lockfile — root
+# package-lock.json and watcher/package-lock.json — on each push with a pinned,
+# checksum-verified binary; see ci.yml "Supply-chain scan" and docs/SECURITY.md
+# -> "Supply-chain scanning").
 #
 # Rules for entries below:
 #   * every ignore MUST carry a written reason,
@@ -17,17 +18,27 @@
 id = "GHSA-ggr8-5vv4-36mx"
 reason = "dev-only prisma tooling chain (prisma -> @prisma/config -> deepmerge-ts); absent from the runtime image; fix requires a major transitive bump - revisit with the next prisma upgrade"
 
-# @steempro/dsteem -> secp256k1 -> elliptic (dev tooling). The advisory is an
-# ECDSA *signing* fault (CVE-2025-14505): faulty k-truncation can leak a key if
-# an attacker holds both a faulty and a correct signature for the same input. The
-# engine runtime never signs - user transactions are signed client-side
-# (Keychain), and consensus authorities arrive pre-verified from the chain. Only
-# scripts/genesis.cjs (one-time operator broadcast) links this code; it reads the
-# admin WIF ephemerally from env, never from the repo. No upstream fix exists
+# @steempro/dsteem -> secp256k1 -> elliptic. The advisory is an ECDSA *signing*
+# fault (CVE-2025-14505): faulty k-truncation can leak a key if an attacker holds
+# both a faulty and a correct signature for the same input. No upstream fix exists
 # (all elliptic versions <= 6.6.1 are affected).
+#
+# Status is NO LONGER dev-only: scripts/ (multisig issue/burn/withdraw/transfer)
+# and the watcher image (docker-compose.watcher.yml - pure-JS secp256k1 under
+# npm --ignore-scripts) sign continuously on the mainnet ops path. The engine
+# runtime itself still never signs (Keychain/client-side; first-party transport).
+# Accepted because:
+#   * a leak needs BOTH a faulty and a correct signature over one identical
+#     input - steem tx inputs carry ref-block + expiration, so identical inputs
+#     recur only on a deliberate retry of the same tx,
+#   * blast radius is bounded by the 2-of-3 active threshold: one leaked WIF
+#     cannot act alone, and the third WIF never touches a signing host,
+#   * no fix exists to take (secp256k1 3.8.1 / elliptic 6.6.1 are current).
+# Re-open when: elliptic ships a fixed release, the advisory's severity is
+# upgraded, or dsteem replaces this signing chain.
 [[IgnoredVulns]]
 id = "GHSA-848j-6mx2-7j84"
-reason = "dev-only tooling chain (dsteem -> secp256k1 -> elliptic); engine runtime never signs (Keychain/client-side signing); only the one-time genesis broadcast script links it; no upstream fix exists for <= 6.6.1 - revisit when elliptic ships one"
+reason = "accepted on the production ops signing path (scripts/ + watcher image via dsteem -> secp256k1 -> elliptic): leak requires a faulty+correct signature pair over one identical input, a single leaked active WIF stays below the 2-of-3 threshold, no upstream fix exists for <= 6.6.1 - revisit when elliptic ships one or the advisory is upgraded"
 
 # ts-jest -> babel-plugin-istanbul -> js-yaml@3 -> argparse -> sprintf-js (test
 # tooling). The advisory is a DoS via unbounded precision specifiers in format

@@ -54,8 +54,8 @@ SCE value — the testnet ledger is a different world.
 
 ## 1. Deploy the testnet engine (Dokploy)
 
-Second compose service on the **same repository/compose file** as mainnet
-(`docker-compose.dokploy.yml`), with its own Postgres service and domains.
+A second compose service from the **same repository** as mainnet, with its own
+Postgres service and domains.
 Environment differences from mainnet:
 
 ```dotenv

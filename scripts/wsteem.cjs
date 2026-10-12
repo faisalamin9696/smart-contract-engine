@@ -16,6 +16,10 @@
  *   --withdraw <qty>     release a peg-out: engine burn FIRST, then L1 STEEM
  *                        transfer (burn-then-release: a crash between the legs
  *                        can never leave the user without their funds)
+ *   --transfer <qty>     peg-out step 1 (CLI fallback for the Portal drawer):
+ *                        holder sends WSTEEM to the bridge on the engine —
+ *                        requires --to, signs with ACCOUNT's own active key
+ *                        (set BRIDGE_ACCOUNT to the holding account)
  *   --rehearse [qty]     testnet-only end-to-end peg-out rehearsal: burn from
  *                        bridge inventory through real consensus + L1 release
  *                        broadcast + automatic conservation checks
@@ -23,6 +27,15 @@
  *   --audit              full backing evidence: every engine issue/burn/transfer
  *                        cross-checked against every L1 transfer in/out of the
  *                        bridge account (read-only, no key needed)
+ *   --pending            pending bridge movements: unissued deposits + queued
+ *                        peg-outs, with exact commands (read-only, no key)
+ *   --watch              the full bridge daemon: auto-issues memo-attributed
+ *                        deposits AND auto-releases peg-outs to the signed
+ *                        sender (needs STEEM_ACTIVE_WIF; one action per tick;
+ *                        stops with exit 1 on any inconsistency — shortfall,
+ *                        unbackable attribution, state/logs disagreement,
+ *                        backing with no deposit). WATCH_INTERVAL (s, default
+ *                        30), WATCH_LAG_TICKS (default 20) tune the loop.
  *
  * Usage (PowerShell):
  *   $env:SCE_OP_ID='sce-testnet1'; $env:ENGINE_API='https://sce-test.steempro.com'
@@ -31,18 +44,27 @@
  *   node scripts/wsteem.cjs --issue 100000                 # create + issue inventory
  *   node scripts/wsteem.cjs --issue 5 --to alice --no-create   # deposit: verify L1 first!
  *   node scripts/wsteem.cjs --withdraw 5 --to alice        # peg-out: burn + L1 release
+ *   node scripts/wsteem.cjs --transfer 5 --to steempro.funds  # peg-out step 1 (holder's key)
  *   node scripts/wsteem.cjs --rehearse 0.010               # testnet peg-out drill (WIF)
  *   node scripts/wsteem.cjs --reconcile                    # invariant check (no key)
  *   node scripts/wsteem.cjs --audit                        # backing evidence (no key)
+ *   node scripts/wsteem.cjs --pending                      # pending movements (no key)
+ *   node scripts/wsteem.cjs --watch                        # bridge daemon (auto both ways)
  *
  * Env:
  *   SCE_OP_ID        target instance (default sce-mainnet1)
  *   BRIDGE_ACCOUNT   bridge account (default steempro.funds)
  *   STEEM_RPC        signing/broadcast endpoint (default https://api.steemit.com)
  *   ENGINE_API       engine REST base (default https://sce-api.steempro.com)
- *   STEEM_ACTIVE_WIF active key of the bridge account (not needed for --reconcile / --dry-run)
+ *   STEEM_ACTIVE_WIF active key(s) of the bridge account — one WIF, or several
+ *                    space-separated once the 2-of-3 multisig is live
+ *                    (scripts/bridge-multisig.cjs); not needed for
+ *                    --reconcile / --audit / --dry-run
  */
 const { Client, PrivateKey } = require('@steempro/dsteem');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const OP_ID = process.env.SCE_OP_ID || 'sce-mainnet1';
 const ACCOUNT = process.env.BRIDGE_ACCOUNT || process.env.GENESIS_ACCOUNT || 'steempro.funds';
@@ -53,7 +75,64 @@ const STEP_TIMEOUT_MS = 120000;
 
 const SYMBOL = 'WSTEEM';
 
+// Option-A genesis: the L1 index of the sweep-out that zeroed steempro.funds
+// (2026-10-11T17:17:42) — the account's earlier life was NOT bridge activity,
+// so deposit detection only considers transfers-in after this index.
+const BRIDGE_GENESIS_L1_INDEX = 12939;
+
+// decimal quantity param of a fungible engine op (market/NFT ops lack it)
+const qtyOf = (o) => (o.params && typeof o.params.quantity === 'string' ? o.params.quantity : null);
+
 /* --------------------------------------------------------------- arguments */
+
+/**
+ * Single-instance guard for --watch: two concurrent watchers could race the
+ * same deposit before either's log view refreshes (the consumed sets are
+ * per-process). The lock file holds the owner PID; a dead PID is a stale
+ * lock from a crash and is reclaimed on the next start.
+ */
+function acquireWatchLock() {
+  const lock = path.join(os.tmpdir(), `sce-watch-${OP_ID}-${ACCOUNT}.lock`);
+  if (fs.existsSync(lock)) {
+    let pid = NaN;
+    try {
+      pid = Number(fs.readFileSync(lock, 'utf8').trim());
+    } catch {
+      /* unreadable lock — treat as stale */
+    }
+    let alive = false;
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+    }
+    if (alive) {
+      throw new Error(
+        `another --watch is already running (pid ${pid}, lock ${lock}) — refusing to start a second instance`,
+      );
+    }
+  }
+  fs.writeFileSync(lock, String(process.pid));
+  const release = () => {
+    try {
+      fs.unlinkSync(lock);
+    } catch {
+      /* already gone */
+    }
+  };
+  process.on('exit', release);
+  process.on('SIGINT', () => {
+    release();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    release();
+    process.exit(143);
+  });
+}
 
 function parseQty(value, flag) {
   if (value === undefined || !/^\d+(\.\d{1,3})?$/.test(value) || Number(value) <= 0) {
@@ -69,6 +148,7 @@ function parseArgs(argv) {
     noCreate: false,
     issue: null,
     withdraw: null,
+    transfer: null,
     rehearse: '0.010',
     to: null,
   };
@@ -78,6 +158,8 @@ function parseArgs(argv) {
     else if (arg === '--no-create') args.noCreate = true;
     else if (arg === '--reconcile') args.mode = 'reconcile';
     else if (arg === '--audit') args.mode = 'audit';
+    else if (arg === '--pending') args.mode = 'pending';
+    else if (arg === '--watch') args.mode = 'watch';
     else if (arg === '--rehearse') {
       args.mode = 'rehearse';
       // optional inline quantity: `--rehearse 0.050` (default 0.010)
@@ -92,6 +174,9 @@ function parseArgs(argv) {
     } else if (arg === '--withdraw') {
       args.mode = 'withdraw';
       args.withdraw = parseQty(argv[++i], '--withdraw');
+    } else if (arg === '--transfer') {
+      args.mode = 'transfer';
+      args.transfer = parseQty(argv[++i], '--transfer');
     } else if (arg === '--to') {
       args.to = argv[++i];
       if (args.to === undefined || !/^[a-z][a-z0-9.-]{2,15}$/.test(args.to)) {
@@ -100,6 +185,9 @@ function parseArgs(argv) {
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
+  }
+  if (args.mode === 'transfer' && args.to === null) {
+    throw new Error('--transfer requires --to <receiving account>');
   }
   if (args.to === null) args.to = ACCOUNT;
   return args;
@@ -128,7 +216,7 @@ function buildSeedSteps(args) {
     });
   }
   if (steps.length === 0) {
-    throw new Error('nothing to do: pass --issue <qty>, --withdraw <qty>, --rehearse [qty], --reconcile or --audit');
+    throw new Error('nothing to do: pass --issue <qty>, --withdraw <qty>, --transfer <qty> --to <acct>, --rehearse [qty], --reconcile or --audit');
   }
   return steps;
 }
@@ -204,10 +292,13 @@ async function fetchEngineOps(symbol, maxPages = 100) {
 
 /** Transfer ops touching an L1 account — the audit's L1-side evidence. */
 async function l1TransferHistory(account, maxPages) {
-  const pages = maxPages ?? Number(process.env.AUDIT_L1_PAGES || 50);
+  const pages = maxPages ?? Number(process.env.AUDIT_L1_PAGES || 200);
   const client = new Client(STEEM_RPC);
   const rows = [];
-  let start = -1;
+  const seen = new Set();
+  let start = -1; // -1 = newest window (warm-up)
+  let minSeen = Infinity;
+  let prevMin = Infinity;
   let truncated = false;
   for (let page = 0; page < pages; page += 1) {
     let batch;
@@ -220,11 +311,21 @@ async function l1TransferHistory(account, maxPages) {
     if (!Array.isArray(batch) || batch.length === 0) break;
     for (const entry of batch) {
       const index = Array.isArray(entry) ? entry[0] : -1;
+      // window bounds track EVERY entry — the mask is ignored server-side, so
+      // most entries are votes; hop math must use true window indices
+      if (index >= 0) minSeen = Math.min(minSeen, index);
       const record = Array.isArray(entry) ? entry[1] : null;
       // nodes report the op type either numerically (legacy) or by name; the
       // server-side mask is not honoured everywhere, so filter here regardless
       if (!record || !Array.isArray(record.op)) continue;
       if (record.op[0] !== 2 && record.op[0] !== 'transfer') continue;
+      // probed behavior of api.steemit.com: windows are ASCENDING and can
+      // overlap at the seam — dedup transfers by history index (every op
+      // occupies exactly one index)
+      if (index >= 0) {
+        if (seen.has(index)) continue;
+        seen.add(index);
+      }
       const transfer = record.op[1] || {};
       rows.push({
         index,
@@ -236,10 +337,17 @@ async function l1TransferHistory(account, maxPages) {
         memo: transfer.memo ?? '',
       });
     }
-    const lastEntry = batch[batch.length - 1];
-    const lastIndex = Array.isArray(lastEntry) ? lastEntry[0] : -1;
-    if (lastIndex <= 0) return { rows, truncated: false };
-    start = lastIndex - 1;
+    if (!Number.isFinite(minSeen)) break; // nothing parseable at all
+    if (minSeen === 0) return { rows, truncated: false }; // reached the account's first index
+    if (page > 0 && minSeen >= prevMin) {
+      return { rows, truncated: false }; // no progress — stop rather than loop
+    }
+    // probed: an explicit start returns the ASCENDING window [start-100 ..
+    // start] (101 entries), and the node rejects start < limit — so request
+    // minSeen-1 for the contiguous next-older block, except at the very tail
+    // where start=100 yields [0..100] and reaches the account's first op
+    start = Math.max(minSeen - 1, 100);
+    prevMin = minSeen;
     if (page === pages - 1) truncated = true;
   }
   return { rows, truncated };
@@ -255,19 +363,35 @@ function fmtList(rows, render, cap = 8) {
   if (rows.length > cap) console.log(`    ... +${rows.length - cap} more`);
 }
 
-async function verifyActiveKey(key) {
+/**
+ * Pre-flight: every provided WIF must be listed in the bridge's active
+ * authority, and their combined weight must meet the threshold — so the
+ * 2-of-3 multisig (scripts/bridge-multisig.cjs) is enforced before anything
+ * is signed, not discovered at broadcast time.
+ */
+async function verifyActiveKey(keys) {
   const client = new Client(STEEM_RPC);
-  const pubkey = key.createPublic().toString();
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const account = await l1Account(ACCOUNT);
       if (!account) throw new Error(`account ${ACCOUNT} not found on chain`);
-      const authorised = account.active.key_auths.some(([listed]) => listed === pubkey);
-      if (!authorised) {
+      let weight = 0;
+      for (const key of keys) {
+        const pubkey = key.createPublic().toString();
+        const entry = account.active.key_auths.find(([listed]) => listed === pubkey);
+        if (!entry) {
+          throw new Error(
+            `the provided WIF ${pubkey} is not an active key of ${ACCOUNT} (not listed in active key_auths)`,
+          );
+        }
+        weight += entry[1];
+      }
+      if (weight < account.active.weight_threshold) {
         throw new Error(
-          `the provided WIF is not an active key of ${ACCOUNT} (expected a key whose public part is listed in active key_auths)`,
+          `provided key weight ${weight} is below ${ACCOUNT}'s active threshold ${account.active.weight_threshold} — add more active WIFs to STEEM_ACTIVE_WIF (space-separated)`,
         );
       }
+      console.log(`  ${keys.length} key(s) verified, signing weight ${weight} >= threshold ${account.active.weight_threshold}`);
       return;
     } catch (error) {
       if (attempt === 3) throw error;
@@ -276,7 +400,7 @@ async function verifyActiveKey(key) {
   }
 }
 
-async function runEngineStep(client, key, step) {
+async function runEngineStep(client, keys, step) {
   console.log(`${step.label} ...`);
   const op = [
     'custom_json',
@@ -287,7 +411,7 @@ async function runEngineStep(client, key, step) {
       json: JSON.stringify(step.payload),
     },
   ];
-  const confirmation = await client.broadcast.sendOperations([op], key);
+  const confirmation = await client.broadcast.sendOperations([op], keys.length === 1 ? keys[0] : keys);
   console.log(`  broadcast tx ${confirmation.id}`);
 
   const log = await waitForOutcome(confirmation.id);
@@ -307,7 +431,7 @@ async function runEngineStep(client, key, step) {
 
 /* -------------------------------------------------------------------- modes */
 
-async function seedMode(args, key) {
+async function seedMode(args, keys) {
   const steps = buildSeedSteps(args);
   if (args.dryRun) {
     for (const step of steps) {
@@ -319,7 +443,7 @@ async function seedMode(args, key) {
   }
 
   const client = new Client(STEEM_RPC);
-  for (const step of steps) await runEngineStep(client, key, step);
+  for (const step of steps) await runEngineStep(client, keys, step);
 
   console.log(`${SYMBOL} step complete.`);
   if (OP_ID === 'sce-mainnet1') {
@@ -329,13 +453,66 @@ async function seedMode(args, key) {
 }
 
 /**
- * Peg-out: the user has already engine-transferred WSTEEM to the bridge.
- * Order: engine burn FIRST (destroys the wrapper, frees the backing), then the
- * L1 STEEM release. A failure between the legs leaves the user whole (their
- * wrapper is gone and the operator simply re-sends the STEEM); the opposite
- * order could pay twice.
+ * Peg-out step 1 (CLI fallback for the Portal drawer): the holder sends
+ * WSTEEM to the bridge on the engine, so the bridge's burn can then destroy
+ * it. The acting account is ACCOUNT — run with BRIDGE_ACCOUNT set to the
+ * HOLDING account (e.g. steempro.com) and that account's single active key.
  */
-async function withdrawMode(args, key) {
+async function transferMode(args, keys) {
+  if (args.to === ACCOUNT) {
+    throw new Error(
+      `--transfer target equals the acting account (${ACCOUNT}) — set BRIDGE_ACCOUNT to the holding account`,
+    );
+  }
+  const held = parseFloat((await engineBalance(ACCOUNT, SYMBOL)) ?? '0');
+  if (held < Number(args.transfer)) {
+    throw new Error(
+      `${ACCOUNT} holds ${held.toFixed(3)} ${SYMBOL} on the engine — needs ${args.transfer}. Nothing sent.`,
+    );
+  }
+  const step = {
+    label: `tokens.transfer ${args.transfer} ${SYMBOL} ${ACCOUNT} -> ${args.to}`,
+    payload: wiki('transfer', { symbol: SYMBOL, to: args.to, quantity: args.transfer }),
+  };
+  if (args.dryRun) {
+    console.log(`--- ${step.label}`);
+    console.log(JSON.stringify(step.payload, null, 2));
+    console.log(`(custom_json id = ${OP_ID}, broadcast as ${ACCOUNT})`);
+    return;
+  }
+
+  const client = new Client(STEEM_RPC);
+  await runEngineStep(client, keys, step);
+  console.log(`${SYMBOL} transfer complete.`);
+  console.log('Next (peg-out): run --withdraw with the BRIDGE keys, then --reconcile.');
+}
+
+/**
+ * Burn-then-release core, shared by --withdraw and --watch: engine burn FIRST
+ * (destroys the wrapper, frees the backing), then the L1 STEEM release. A
+ * failure between the legs leaves the user whole (wrapper gone, STEEM
+ * re-sendable by the operator); the opposite order could pay twice.
+ */
+async function executePegOut(client, keys, qty, to) {
+  const l1Amount = `${Number(qty).toFixed(3)} STEEM`;
+  await runEngineStep(client, keys, {
+    label: `1 tokens.burn ${qty} ${SYMBOL} (engine)`,
+    payload: wiki('burn', { symbol: SYMBOL, quantity: qty }),
+  });
+  console.log(`2 L1 transfer ${l1Amount} ${ACCOUNT} -> ${to} ...`);
+  const transfer = await client.broadcast.transfer(
+    { from: ACCOUNT, to, amount: l1Amount, memo: `${SYMBOL} bridge withdraw (${OP_ID})` },
+    keys.length === 1 ? keys[0] : keys,
+  );
+  console.log(`  l1 tx ${transfer.id}`);
+  return transfer.id;
+}
+
+/**
+ * Manual peg-out: explicit --qty/--to. The watcher (scanPendingPegOuts +
+ * executePegOut) handles the automatic path with the same machinery.
+ */
+async function withdrawMode(args, keys) {
   const qty = args.withdraw;
   const to = args.to === ACCOUNT ? null : args.to;
   if (!to) throw new Error('--withdraw requires --to <user account>');
@@ -361,18 +538,7 @@ async function withdrawMode(args, key) {
   }
 
   const client = new Client(STEEM_RPC);
-  await runEngineStep(client, key, {
-    label: `1 tokens.burn ${qty} ${SYMBOL} (engine)`,
-    payload: wiki('burn', { symbol: SYMBOL, quantity: qty }),
-  });
-
-  console.log(`2 L1 transfer ${l1Amount} ${ACCOUNT} -> ${to} ...`);
-  const transfer = await client.broadcast.transfer(
-    { from: ACCOUNT, to, amount: l1Amount, memo: `${SYMBOL} bridge withdraw (${OP_ID})` },
-    key,
-  );
-  console.log(`  l1 tx ${transfer.id}`);
-
+  await executePegOut(client, keys, qty, to);
   const after = await l1Account(ACCOUNT);
   console.log(`  bridge L1 balance now ${after ? after.balance : 'unknown'}`);
   console.log(`\nPeg-out complete: wrapper burned, ${l1Amount} released to ${to}.`);
@@ -440,7 +606,6 @@ async function auditMode() {
   // The symbol filter also catches market ops (sell/buy/cancel escrow moves) and
   // could in theory catch an NFT collection of the same name (separate partition)
   // — so every fungible flow is recognized by its decimal `quantity` param.
-  const qtyOf = (o) => (o.params && typeof o.params.quantity === 'string' ? o.params.quantity : null);
   const issues = ops.filter((o) => o.action === 'issue' && qtyOf(o) !== null);
   const burns = ops.filter((o) => o.action === 'burn' && qtyOf(o) !== null);
   const transfers = ops.filter((o) => o.action === 'transfer' && qtyOf(o) !== null);
@@ -478,19 +643,24 @@ async function auditMode() {
   console.log(`    transfers out       : ${outs.length}, -${outTotal.toFixed(3)} STEEM`);
   console.log(`    current balance     : ${l1Balance.toFixed(3)} STEEM`);
   if (l1Truncated) {
-    const pages = process.env.AUDIT_L1_PAGES || 50;
-    console.log(`    NOTE: history capped at ${pages} pages (100 ops each) — raise AUDIT_L1_PAGES for full depth.`);
+    const pages = process.env.AUDIT_L1_PAGES || 200;
+    console.log(`    NOTE: history capped at ${pages} pages (101 entries each) — raise AUDIT_L1_PAGES for full depth.`);
   }
 
   console.log('\n  recent deposits (L1 in):');
   if (ins.length === 0) console.log('    (none)');
   fmtList(
-    ins.slice().reverse(),
+    // walk collects newest window first — sort by history index desc so the
+    // newest deposit always leads the "recent" list
+    ins.slice().sort((x, y) => y.index - x.index),
     (r) => `+ ${r.amount} from ${r.from}  ${r.timestamp}  ${r.txId}${r.memo ? `  memo="${r.memo}"` : ''}`,
   );
   console.log('\n  recent releases (L1 out):');
   if (outs.length === 0) console.log('    (none)');
-  fmtList(outs.slice().reverse(), (r) => `- ${r.amount} to ${r.to}  ${r.timestamp}  ${r.txId}`);
+  fmtList(
+    outs.slice().sort((x, y) => y.index - x.index),
+    (r) => `- ${r.amount} to ${r.to}  ${r.timestamp}  ${r.txId}`,
+  );
 
   console.log('\n  checks:');
   let failed = false;
@@ -525,7 +695,18 @@ async function auditMode() {
   } else {
     const b = Math.round(l1Balance * 1000) === Math.round(supply * 1000);
     console.log(`  ${b ? 'ok  ' : 'FAIL'} b. supply == L1 backing (${supply.toFixed(3)} vs ${l1Balance.toFixed(3)})`);
-    if (!b) failed = true;
+    if (!b) {
+      failed = true;
+      // direction matters: shortfall = underbacked (dangerous); overback =
+      // funds on L1 not yet wrapped (fresh deposit awaiting --issue, or a
+      // peg-out mid-flight — burn-then-release drops supply before L1 moves)
+      console.log(
+        supply > l1Balance
+          ? '         SHORTFALL — do NOT release; investigate before any withdraw or issue.'
+          : '         OVERBACKED — L1 funds are not wrapped yet; verify the pending deposit and run --issue.' +
+            ' (Deposit row missing? The history plugin can lag the state — retry in a minute.)',
+      );
+    }
   }
 
   if (failed) {
@@ -535,6 +716,320 @@ async function auditMode() {
   console.log('\n  Audit clean.');
 }
 
+/* ------------------------------------------------- deposit detection core */
+
+/**
+ * Shared detection for --pending / --watch: how much L1 backing is not yet
+ * wrapped, and which post-genesis deposits account for it.
+ *
+ * Guards baked in (each one learned from a live run):
+ *   * state-first: balance + supply come from chain state, so history-plugin
+ *     lag delays ATTRIBUTION, never DETECTION;
+ *   * attribution: post-genesis transfers-in FIFO-paired against engine
+ *     issues (issue k consumed deposit k in arrival order);
+ *   * memo = recipient (trimmed — real memos carry stray spaces); anything
+ *     else is flagged unattributed, never guessed;
+ *   * recipient must exist on L1 — an engine balance keyed to a non-existent
+ *     account could never be signed away;
+ *   * sum(pending) > excess => inconsistency => STOP (never double-issue);
+ *   * excess < 0 => shortfall => STOP.
+ */
+async function scanPendingDeposits() {
+  const round3 = (n) => Math.round(n * 1000) / 1000;
+  const token = await engineToken(SYMBOL);
+  if (!token) throw new Error(`${SYMBOL} does not exist on ${ENGINE_API} — nothing to watch.`);
+  if (token.issuer !== ACCOUNT) {
+    throw new Error(
+      `acting account ${ACCOUNT} is not the issuer of ${SYMBOL} (issuer is ${token.issuer}) — check BRIDGE_ACCOUNT`,
+    );
+  }
+  const supply = round3(parseFloat(token.supply));
+  const acct = await l1Account(ACCOUNT);
+  const balance = acct ? round3(l1SteemToNumber(acct.balance)) : 0;
+  const excess = round3(balance - supply);
+  const base = { balance, supply, excess };
+  if (excess < 0) return { ...base, pending: [], pendingSum: 0, anomalies: [], shortfall: true };
+  if (excess === 0) return { ...base, pending: [], pendingSum: 0, anomalies: [], shortfall: false };
+
+  const anomalies = [];
+  const { rows } = await l1TransferHistory(ACCOUNT);
+  const deposits = rows
+    .filter((r) => r.to === ACCOUNT && (OP_ID !== 'sce-mainnet1' || r.index > BRIDGE_GENESIS_L1_INDEX))
+    .sort((a, b) => a.index - b.index);
+  const { ops } = await fetchEngineOps(SYMBOL);
+  const issues = ops
+    .filter((o) => o.action === 'issue' && qtyOf(o) !== null)
+    .sort((a, b) => (a.height ?? 0) - (b.height ?? 0));
+
+  if (issues.length > deposits.length) {
+    anomalies.push(
+      `${issues.length} applied issues but only ${deposits.length} post-genesis deposits — ` +
+        'issuance without visible backing; investigate manually',
+    );
+  }
+
+  const pending = deposits.slice(issues.length).map((dep) => {
+    const qty = String(dep.amount).split(' ')[0];
+    const memoName = (dep.memo || '').trim();
+    return { ...dep, qty, memoName, recipient: null, reason: null };
+  });
+
+  // memo must name an existing L1 account (batched lookup)
+  const names = [...new Set(pending.map((d) => d.memoName).filter((n) => /^[a-z][a-z0-9.-]{2,15}$/.test(n) && n !== ACCOUNT))];
+  if (names.length) {
+    const client = new Client(STEEM_RPC);
+    const found = await client.database.getAccounts(names);
+    const have = new Set(found.map((a) => a.name));
+    for (const dep of pending) {
+      if (!/^[a-z][a-z0-9.-]{2,15}$/.test(dep.memoName)) {
+        dep.reason = `memo "${dep.memo}" does not name an engine account`;
+      } else if (dep.memoName === ACCOUNT) {
+        dep.reason = 'memo names the bridge itself';
+      } else if (!have.has(dep.memoName)) {
+        dep.reason = `memo names ${dep.memoName}, which does not exist on L1`;
+      } else {
+        dep.recipient = dep.memoName;
+      }
+    }
+  } else {
+    for (const dep of pending) dep.reason = `memo "${dep.memo}" does not name an engine account`;
+  }
+
+  const pendingSum = round3(pending.reduce((a, d) => a + Number(d.qty), 0));
+  if (pendingSum > excess) {
+    anomalies.push(
+      `post-genesis deposits pending ${pendingSum.toFixed(3)} exceed unbacked excess ${excess.toFixed(3)} — ` +
+        'refusing to attribute; investigate manually',
+    );
+  }
+  return { ...base, pending, pendingSum, anomalies, shortfall: false };
+}
+
+/**
+ * Peg-out detection (shared by --pending and --watch): bridge on-engine
+ * balance (state) with FIFO-paired burns consumed = unconsumed inbound
+ * transfers, each one a user's wrapper waiting to become STEEM.
+ *
+ * The release target is the signed op's ACTOR — never the memo: a memo is
+ * user-chosen text and must not be able to redirect real L1 funds. The actor
+ * proved L1 identity by signing the custom_json, so no lookup is needed.
+ */
+async function scanPendingPegOuts() {
+  const round3 = (n) => Math.round(n * 1000) / 1000;
+  const held = round3(parseFloat((await engineBalance(ACCOUNT, SYMBOL)) ?? '0'));
+  const base = { held };
+  if (held <= 0) return { ...base, pegOuts: [], unconsumedSum: 0, anomalies: [] };
+
+  const anomalies = [];
+  const { ops } = await fetchEngineOps(SYMBOL);
+  const inbound = ops
+    .filter((o) => o.action === 'transfer' && qtyOf(o) !== null && o.params.to === ACCOUNT)
+    .sort((a, b) => (a.height ?? 0) - (b.height ?? 0));
+  const burns = ops
+    .filter((o) => o.action === 'burn' && qtyOf(o) !== null && o.actor === ACCOUNT)
+    .sort((a, b) => (a.height ?? 0) - (b.height ?? 0));
+
+  if (burns.length > inbound.length) {
+    anomalies.push(
+      `${burns.length} bridge burns but only ${inbound.length} inbound transfers — ` +
+        'inventory spent without visible inbound; investigate manually',
+    );
+  }
+  const pegOuts = inbound.slice(burns.length).map((o) => ({ qty: qtyOf(o), sender: o.actor, height: o.height }));
+  const unconsumedSum = round3(pegOuts.reduce((a, p) => a + Number(p.qty), 0));
+
+  if (held > 0 && pegOuts.length === 0) {
+    anomalies.push(
+      `bridge holds ${held.toFixed(3)} ${SYMBOL} but every inbound transfer appears burned — ` +
+        'state and logs disagree; investigate manually',
+    );
+  }
+  if (unconsumedSum > held) {
+    anomalies.push(
+      `unconsumed inbound ${unconsumedSum.toFixed(3)} exceeds bridge engine balance ${held.toFixed(3)} — ` +
+        'refusing to release; investigate manually',
+    );
+  }
+  const acct = await l1Account(ACCOUNT);
+  const l1 = acct ? round3(l1SteemToNumber(acct.balance)) : 0;
+  if (unconsumedSum > l1) {
+    anomalies.push(
+      `pending peg-outs ${unconsumedSum.toFixed(3)} exceed bridge L1 balance ${l1.toFixed(3)} — ` +
+        'release would fail on-chain; investigate manually',
+    );
+  }
+  return { ...base, pegOuts, unconsumedSum, anomalies, unexplained: round3(Math.max(held - unconsumedSum, 0)) };
+}
+
+/** Read-only report: what would be auto-issued, with exact commands. */
+async function pendingMode() {
+  console.log(`--- pending bridge movements (${OP_ID}, bridge ${ACCOUNT})\n`);
+  const report = await scanPendingDeposits();
+  console.log(`  L1 balance : ${report.balance.toFixed(3)} STEEM`);
+  console.log(`  supply     : ${report.supply.toFixed(3)} ${SYMBOL}`);
+  console.log(`  excess     : ${report.excess.toFixed(3)} (backing not yet wrapped)\n`);
+
+  if (report.shortfall) {
+    console.log('  SHORTFALL: circulating supply exceeds L1 backing — do NOT issue anything; run --audit.');
+    process.exit(1);
+  }
+  if (report.anomalies.length) {
+    for (const a of report.anomalies) console.log(`  ANOMALY: ${a}`);
+    process.exit(1);
+  }
+  if (!report.pending.length) {
+    console.log('  No unissued deposits — everything is wrapped.');
+  } else {
+    console.log(`  ${report.pending.length} deposit(s) totalling ${report.pendingSum.toFixed(3)} ${SYMBOL}:\n`);
+    report.pending.forEach((dep, i) => {
+      console.log(`  ${i + 1}. +${dep.amount} from ${dep.from}  ${dep.timestamp}  tx ${dep.txId}  memo="${dep.memo}"`);
+      if (dep.recipient) {
+        console.log(`     -> node scripts/wsteem.cjs --issue ${dep.qty} --to ${dep.recipient} --no-create`);
+      } else {
+        console.log(`     !! not auto-issuable: ${dep.reason} — verify manually, then --issue ${dep.qty} --to <account> --no-create`);
+      }
+    });
+  }
+
+  const peg = await scanPendingPegOuts();
+  if (peg.anomalies.length) {
+    for (const a of peg.anomalies) console.log(`\n  ANOMALY: ${a}`);
+    process.exit(1);
+  }
+  if (peg.pegOuts.length) {
+    console.log(`\n  ${peg.pegOuts.length} pending peg-out(s), bridge holds ${peg.held.toFixed(3)} ${SYMBOL} on-engine:\n`);
+    peg.pegOuts.forEach((p, i) => {
+      console.log(`  ${i + 1}. ${p.qty} ${SYMBOL} from ${p.sender} (engine h${p.height})`);
+      console.log(`     -> node scripts/wsteem.cjs --withdraw ${p.qty} --to ${p.sender}`);
+    });
+    if (peg.unexplained > 0) {
+      console.log(`\n  note: ${peg.unexplained.toFixed(3)} ${SYMBOL} of bridge inventory has no inbound pair — it will not auto-release.`);
+    }
+  } else {
+    console.log('\n  No pending peg-outs (bridge on-engine balance is 0).');
+  }
+  console.log('\n  Funds first: confirm each movement in your records before issuing/releasing.');
+}
+
+/**
+ * Bridge watcher: both directions, one action per tick.
+ *   deposit side — state-first excess detection, memo attribution, guarded issue;
+ *   peg-out side — unconsumed inbound transfers released to the signed op's
+ *                  sender via the shared burn-then-release core.
+ * Any doubt — shortfall, inconsistent attribution, state/logs disagreement,
+ * backing with no deposit — stops the loop with exit 1 instead of guessing.
+ * In-session consumed sets (deposit indices, engine heights) make double
+ * actions impossible even if a future scan misbehaves.
+ */
+async function watchMode(args, keys) {
+  const intervalMs = (Number(process.env.WATCH_INTERVAL) || 30) * 1000;
+  const lagLimit = Number(process.env.WATCH_LAG_TICKS) || 20;
+  const client = new Client(STEEM_RPC);
+  const issuedIndices = new Set();
+  const consumedPegHeights = new Set();
+  const flagged = new Set();
+  let lagTicks = 0;
+  console.log(
+    `Watch: auto-issuing deposits and auto-releasing peg-outs for ${ACCOUNT} every ${intervalMs / 1000}s — Ctrl+C stops.\n`,
+  );
+
+  for (;;) {
+    const stamp = new Date().toISOString().slice(11, 19);
+
+    /* ---------------- deposit side (state-first) ---------------- */
+    let report;
+    try {
+      report = await scanPendingDeposits();
+    } catch (error) {
+      console.error(`[${stamp}] deposit scan failed: ${error.message} — retrying next tick`);
+      await sleep(intervalMs);
+      continue;
+    }
+    if (report.shortfall) {
+      console.error(`[${stamp}] SHORTFALL: supply ${report.supply.toFixed(3)} > L1 ${report.balance.toFixed(3)} — STOPPING.`);
+      console.error('Run --audit and investigate before any further op.');
+      process.exit(1);
+    }
+    if (report.anomalies.length) {
+      for (const a of report.anomalies) console.error(`[${stamp}] ANOMALY: ${a}`);
+      console.error('STOPPING — no issuance performed. Investigate manually (see docs/BRIDGE.md).');
+      process.exit(1);
+    }
+
+    if (report.excess > 0 && !report.pending.length) {
+      lagTicks += 1;
+      console.log(
+        `[${stamp}] excess ${report.excess.toFixed(3)} but no post-genesis deposit visible yet ` +
+          `(history lag) ${lagTicks}/${lagLimit}`,
+      );
+      if (lagTicks >= lagLimit) {
+        console.error(
+          `STOPPING: backing without an attributable deposit for ${lagTicks} ticks — ` +
+            'likely non-deposit credits (rewards) or a missed transfer. Sweep stray credits out, run --audit.',
+        );
+        process.exit(1);
+      }
+    } else {
+      lagTicks = 0;
+    }
+
+    for (const dep of report.pending) {
+      if (dep.recipient) continue;
+      if (flagged.has(dep.index)) continue;
+      flagged.add(dep.index);
+      console.log(
+        `[${stamp}] unattributed deposit +${dep.amount} tx ${dep.txId}: ${dep.reason} — ` +
+          'will NOT auto-issue it; handle manually.',
+      );
+    }
+
+    const next = report.pending.find((d) => d.recipient && !issuedIndices.has(d.index));
+    if (next) {
+      // funds-first re-verified inside scanPendingDeposits on this very tick
+      console.log(
+        `[${stamp}] deposit +${next.amount} (tx ${next.txId}) -> issuing ${next.qty} ${SYMBOL} to ${next.recipient}`,
+      );
+      await runEngineStep(client, keys, {
+        label: `tokens.issue ${next.qty} ${SYMBOL} to ${next.recipient}`,
+        payload: wiki('issue', { symbol: SYMBOL, to: next.recipient, quantity: next.qty }),
+      });
+      issuedIndices.add(next.index);
+      continue; // one action per tick — re-scan before the next
+    }
+
+    /* ---------------- peg-out side ---------------- */
+    let peg;
+    try {
+      peg = await scanPendingPegOuts();
+    } catch (error) {
+      console.error(`[${stamp}] peg-out scan failed: ${error.message} — retrying next tick`);
+      await sleep(intervalMs);
+      continue;
+    }
+    if (peg.anomalies.length) {
+      for (const a of peg.anomalies) console.error(`[${stamp}] ANOMALY: ${a}`);
+      console.error('STOPPING — no release performed. Investigate manually (see docs/BRIDGE.md).');
+      process.exit(1);
+    }
+
+    const pegNext = peg.pegOuts.find((p) => !consumedPegHeights.has(p.height));
+    if (pegNext) {
+      console.log(
+        `[${stamp}] peg-out ${pegNext.qty} ${SYMBOL} from ${pegNext.sender} (engine h${pegNext.height}) -> burn + release`,
+      );
+      await executePegOut(client, keys, pegNext.qty, pegNext.sender);
+      consumedPegHeights.add(pegNext.height);
+      continue; // one action per tick
+    }
+
+    /* ---------------- idle ---------------- */
+    console.log(
+      `[${stamp}] idle: excess ${report.excess.toFixed(3)}, bridge holds ${peg.held.toFixed(3)} ${SYMBOL} on-engine`,
+    );
+    await sleep(intervalMs);
+  }
+}
+
 /**
  * Testnet-only peg-out rehearsal: burn a dust quantity from bridge inventory
  * through the real consensus path, broadcast the matching L1 release, then
@@ -542,7 +1037,7 @@ async function auditMode() {
  * like scripts/market-rehearsal.cjs. Default release target is the bridge
  * itself — a cost-free, balance-neutral self-transfer.
  */
-async function rehearseMode(args, key) {
+async function rehearseMode(args, keys) {
   const qty = args.rehearse;
   const to = args.to; // defaults to the bridge itself
   const selfRelease = to === ACCOUNT;
@@ -575,7 +1070,7 @@ async function rehearseMode(args, key) {
   }
 
   const client = new Client(STEEM_RPC);
-  await runEngineStep(client, key, {
+  await runEngineStep(client, keys, {
     label: `1 tokens.burn ${qty} ${SYMBOL} (engine)`,
     payload: wiki('burn', { symbol: SYMBOL, quantity: qty }),
   });
@@ -583,7 +1078,7 @@ async function rehearseMode(args, key) {
   console.log(`2 L1 transfer ${l1Amount} ${ACCOUNT} -> ${to} ...`);
   const transfer = await client.broadcast.transfer(
     { from: ACCOUNT, to, amount: l1Amount, memo: `${SYMBOL} bridge withdraw (${OP_ID})` },
-    key,
+    keys.length === 1 ? keys[0] : keys,
   );
   console.log(`  l1 tx ${transfer.id}`);
 
@@ -638,8 +1133,13 @@ async function rehearseMode(args, key) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  // single instance BEFORE anything else: two watchers racing the same
+  // deposit is the one bug the in-session consumed sets cannot cover
+  if (args.mode === 'watch') acquireWatchLock();
+
   // read-only modes never touch a key
   if (args.mode === 'audit') return auditMode();
+  if (args.mode === 'pending') return pendingMode();
 
   const needsKey = !args.dryRun && args.mode !== 'reconcile';
 
@@ -656,24 +1156,27 @@ async function main() {
     process.exit(1);
   }
 
-  let key = null;
+  let keys = null;
   if (needsKey) {
-    const wif = process.env.STEEM_ACTIVE_WIF;
-    if (!wif) {
+    const raw = (process.env.STEEM_ACTIVE_WIF || '').trim();
+    if (!raw) {
       console.error('STEEM_ACTIVE_WIF is not set. In PowerShell:');
-      console.error("  $env:STEEM_ACTIVE_WIF = '5K...'   # active key of " + ACCOUNT);
+      console.error("  $env:STEEM_ACTIVE_WIF = '5K...'   # active key(s) of " + ACCOUNT);
       console.error(`  node scripts/wsteem.cjs --dry-run`);
       process.exit(1);
     }
-    key = PrivateKey.fromString(wif.trim());
-    console.log(`Pre-flight: checking the WIF is an active key of ${ACCOUNT} ...`);
-    await verifyActiveKey(key);
+    // one WIF, or several space/comma-separated once the multisig is live
+    keys = raw.split(/[\s,]+/).filter(Boolean).map((wif) => PrivateKey.fromString(wif));
+    console.log(`Pre-flight: checking ${keys.length} WIF(s) against the active authority of ${ACCOUNT} ...`);
+    await verifyActiveKey(keys);
     console.log('Pre-flight OK.\n');
   }
 
-  if (args.mode === 'withdraw') return withdrawMode(args, key);
-  if (args.mode === 'rehearse') return rehearseMode(args, key);
-  return seedMode(args, key);
+  if (args.mode === 'withdraw') return withdrawMode(args, keys);
+  if (args.mode === 'transfer') return transferMode(args, keys);
+  if (args.mode === 'watch') return watchMode(args, keys);
+  if (args.mode === 'rehearse') return rehearseMode(args, keys);
+  return seedMode(args, keys);
 }
 
 main().catch((error) => {

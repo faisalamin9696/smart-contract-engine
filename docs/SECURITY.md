@@ -217,26 +217,30 @@ SSH/Dokploy access, and the official domain.
 ## Known dependency advisories (audited, explained, tracked)
 
 Two independent gates watch this tree: `npm audit` (production-only, CI gates at
-`--audit-level=critical`) and **OSV-Scanner** (full lockfile, see below). The
-residual advisories are all off the runtime API path:
+`--audit-level=critical`) and **OSV-Scanner** (every lockfile — root and
+`watcher/` — see below). The residual advisories are off the engine API path;
+one is deliberately accepted on the ops-tooling signing path, and its row
+explains the trade:
 
 | Advisory | Severity | Why it is acceptable here |
 | --- | --- | --- |
 | `GHSA-ggr8-5vv4-36mx` — `deepmerge-ts` via prisma CLI (`@prisma/config`) | high | CLI config-file merging over **our own** trusted config — never reachable from API input; fixed only by a major transitive bump that risks the migration tooling; the runtime query client does not use it |
-| `GHSA-848j-6mx2-7j84` (CVE-2025-14505) — `elliptic` / `secp256k1` via `@steempro/dsteem` | medium | **devDependencies only** — one-off `scripts/genesis.cjs` broadcasts; the engine runtime never signs (transactions are signed client-side via Keychain, consensus authorities arrive pre-verified from the chain); no upstream fix exists for ≤ 6.6.1; the production image omits it entirely (runtime transport is first-party fetch, `src/chain/rpc.ts`) |
+| `GHSA-848j-6mx2-7j84` (CVE-2025-14505) — `elliptic` / `secp256k1` via `@steempro/dsteem` | medium | **The engine runtime never signs** — transactions are signed client-side via Keychain, consensus authorities arrive pre-verified, runtime transport is first-party fetch (`src/chain/rpc.ts`), and the production engine image omits the chain entirely. The chain IS used on the ops path (`scripts/` multisig broadcasts and the watcher image, which signs via the pure-JS fallback) — accepted because a leak needs a faulty **and** a correct signature over one identical input (steem tx inputs carry ref-block + expiration), a single leaked active WIF stays below the 2-of-3 threshold, and no upstream fix exists for ≤ 6.6.1 |
 | `GHSA-hp3w-g68c-fv3c` — jest coverage chain (`sprintf-js` via `js-yaml@3`) | moderate | test-time tooling only — the DoS shape needs attacker-controlled format strings, and format strings here are developer-written source; no shipped or reachable runtime code path |
 
 Local checks: `npm audit --omit=dev` (production-only view) and
-`osv-scanner scan --lockfile package-lock.json`.
+`osv-scanner scan --lockfile package-lock.json` (+ `--lockfile
+watcher/package-lock.json` for the watcher's signer tree).
 
 ### Supply-chain scanning (CI gate)
 
-Every push runs a pinned **OSV-Scanner v2.6.0** binary against
-`package-lock.json`. The binary is downloaded from the Google release (SLSA3),
-its SHA256 is checked against the published `SHA256SUMS`, and any vulnerability
-**not** baselined in `./osv-scanner.toml` fails CI before the test steps run.
-Each baseline entry carries a written reason and a re-evaluation trigger — the
-file documents the rules for adding more.
+Every push runs a pinned **OSV-Scanner v2.6.0** binary against each lockfile —
+`package-lock.json` and `watcher/package-lock.json` (the production signer tree
+behind `docker-compose.watcher.yml`). The binary is downloaded from the Google
+release (SLSA3), its SHA256 is checked against the published `SHA256SUMS`, and
+any vulnerability **not** baselined in `./osv-scanner.toml` fails CI before the
+test steps run. Each baseline entry carries a written reason and a re-evaluation
+trigger — the file documents the rules for adding more.
 
 OSV.dev aggregates the GitHub Advisory Database on top of npm's feed, so it
 catches advisories npm has not yet reported (the exact lag the Aug-2026

@@ -7,7 +7,7 @@ verified node.
 
 Related: [SECURITY.md](SECURITY.md) (threat model), [TESTNET.md](TESTNET.md)
 (run an isolated testnet), [DEPLOYMENT.md](DEPLOYMENT.md) (server details),
-[DOKPLOY.md](DOKPLOY.md) (PaaS deploy), [README](../README.md) (architecture).
+[README](../README.md) (architecture).
 
 ## What you get
 
@@ -91,7 +91,7 @@ already-synced node and continue from its cursor — a quick way to stand up a
 second node, and the supported way to distribute the ledger as history grows.
 
 **Publisher** (someone with DB access; on this deployment Postgres runs as an
-internal container — see DOKPLOY.md for its name):
+internal container — the `docker ps` below finds its name):
 
 ```bash
 # find the container:  docker ps --format '{{.Names}}' | grep -i postg
