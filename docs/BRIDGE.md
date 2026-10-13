@@ -141,11 +141,17 @@ node scripts/wsteem.cjs --watch     # daemon: both directions, automatic
 
 **Deposit side.** The detector reads **state first** (L1 balance − supply =
 unbacked excess, immune to history-plugin lag), then attributes excess to
-post-genesis transfers-in FIFO-paired against applied issues. A deposit is
-auto-issuable only if its memo is *exactly* an existing L1 account name (the
-naming convention in step 1 becomes mandatory for hands-free credit).
-Anything else — empty/odd memo, unknown account — is flagged for manual
-handling, never guessed.
+post-genesis transfers-in FIFO-paired against applied issues. Attribution
+reads two sources: the history walk (`get_account_history`) **and a block-log
+tail** (`get_block` over the most recent blocks, `WATCH_BLOCK_TAIL`, default
+2000 ≈ 100 min) — the block log is served from the same real-time state as
+the balance scan, so a deposit is attributable within a block even when the
+history plugin trails by minutes; the tail only runs while unbacked excess
+exists and stops as soon as it overlaps the history walk or covers the whole
+excess. A deposit is auto-issuable only if its memo is *exactly* an existing
+L1 account name (the naming convention in step 1 becomes mandatory for
+hands-free credit). Anything else — empty/odd memo, unknown account — is
+flagged for manual handling, never guessed.
 
 **Peg-out side.** Bridge on-engine balance (state) with FIFO-paired burns
 consumed = queued peg-outs. Each one is released through the shared
@@ -162,7 +168,8 @@ exit 1** on: shortfall (supply > backing), pending sums exceeding the excess
 pair, more burns than inbound), releases exceeding the bridge's L1 balance,
 or backing that stays unattributed for `WATCH_LAG_TICKS` ticks (default 20 ×
 `WATCH_INTERVAL`s ≈ 10 min — the usual cause is non-deposit credits, see the
-rewards note below). `WATCH_INTERVAL` (seconds, default 30) tunes the poll.
+rewards note below; history lag alone no longer reaches this limit thanks to
+the block-log tail). `WATCH_INTERVAL` (seconds, default 30) tunes the poll.
 
 > **Rewards note:** `steempro.funds` accrues curation/author rewards as liquid
 > STEEM — that raises L1 balance without any deposit, so `--audit` check `b`

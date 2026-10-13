@@ -35,7 +35,8 @@
  *                        stops with exit 1 on any inconsistency — shortfall,
  *                        unbackable attribution, state/logs disagreement,
  *                        backing with no deposit). WATCH_INTERVAL (s, default
- *                        30), WATCH_LAG_TICKS (default 20) tune the loop.
+ *                        30), WATCH_LAG_TICKS (default 20), WATCH_BLOCK_TAIL
+ *                        (default 2000 recent blocks) tune the loop.
  *
  * Usage (PowerShell):
  *   $env:SCE_OP_ID='sce-testnet1'; $env:ENGINE_API='https://sce-test.steempro.com'
@@ -351,6 +352,80 @@ async function l1TransferHistory(account, maxPages) {
     if (page === pages - 1) truncated = true;
   }
   return { rows, truncated };
+}
+
+/** Minimal raw Steem JSON-RPC (get_block et al. are verified against this shape live). */
+async function rawRpc(method, params) {
+  const res = await fetch(STEEM_RPC, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
+  if (!res.ok) throw new Error(`STEEM RPC ${method} HTTP ${res.status} from ${STEEM_RPC}`);
+  const body = await res.json();
+  if (body.error) throw new Error(`STEEM RPC ${method}: ${body.error.message || JSON.stringify(body.error)}`);
+  return body.result;
+}
+
+/**
+ * Block-log tail for deposit attribution. The history plugin indexes behind
+ * chain state, so a fresh deposit can be INVISIBLE to get_account_history for
+ * minutes (the "(history lag)" watcher message) while the balance scan
+ * already sees the excess. get_block reads the same real-time database as the
+ * balance scan, and transfers are plain transactions in it — no plugin, no
+ * lag. Only called while unbacked excess exists; idle ticks scan nothing.
+ *
+ * Walks newest -> oldest from head, stopping at the first of:
+ *   (a) a block holding a transfer already known from the history walk
+ *       (the sources overlap — everything older is history's job);
+ *   (b) accumulated tail deposits covering the whole excess;
+ *   (c) WATCH_BLOCK_TAIL blocks (default 2000 ≈ 100 min). Deeper staleness
+ *       falls back to the lag/stop machinery — never to guessing.
+ * Rows mirror the history-row shape (index null) plus block/opInTx for a
+ * stable identity. The window is far smaller than the distance to the
+ * post-genesis anchor on any live network, so tail rows are recent by
+ * construction.
+ */
+async function l1BlockTailTransfers(account, excess, historyRows) {
+  const maxDepth = Number(process.env.WATCH_BLOCK_TAIL) || 2000;
+  const knownTx = new Set(historyRows.map((r) => r.txId).filter(Boolean));
+  const props = await rawRpc('condenser_api.get_dynamic_global_properties', []);
+  const head = Number(props.head_block_number);
+  const rows = [];
+  let sum = 0;
+  let scanned = 0;
+  for (let height = head; height > head - maxDepth; height -= 1, scanned += 1) {
+    const block = await rawRpc('condenser_api.get_block', [height]);
+    if (!block) {
+      throw new Error(`block ${height} unavailable from ${STEEM_RPC} — refusing to attribute on an incomplete chain`);
+    }
+    const hits = [];
+    for (const tx of block.transactions || []) {
+      const ops = tx.operations || [];
+      for (let i = 0; i < ops.length; i += 1) {
+        const op = ops[i];
+        if (!Array.isArray(op) || op[0] !== 'transfer' || !op[1] || op[1].to !== account) continue;
+        hits.push({
+          index: null,
+          block: height,
+          opInTx: i,
+          txId: tx.transaction_id || '',
+          timestamp: block.timestamp || '',
+          from: op[1].from,
+          to: op[1].to,
+          amount: op[1].amount ?? '',
+          memo: op[1].memo ?? '',
+        });
+      }
+    }
+    if (hits.length) {
+      rows.unshift(...hits); // scanned head-down; keep ascending arrival order
+      sum += sumQtys(hits.map((h) => String(h.amount).split(' ')[0]));
+    }
+    if (hits.some((h) => knownTx.has(h.txId))) break; // (a) overlap reached
+    if (sum >= excess) break; // (b) excess fully covered
+  }
+  return { rows, scanned };
 }
 
 /** Precision-safe sum of3-decimal quantity strings (integer thousandths). */
@@ -719,6 +794,15 @@ async function auditMode() {
 /* ------------------------------------------------- deposit detection core */
 
 /**
+ * Stable identity for a deposit across scans: the history index when the
+ * history walk saw it, else tx+op for block-tail rows — both are stable for
+ * the lifetime of the op, so the consumed/flagged sets can never collide.
+ */
+function depKey(dep) {
+  return dep.index === null || dep.index === undefined ? `tx:${dep.txId}:${dep.opInTx ?? 0}` : String(dep.index);
+}
+
+/**
  * Shared detection for --pending / --watch: how much L1 backing is not yet
  * wrapped, and which post-genesis deposits account for it.
  *
@@ -726,7 +810,9 @@ async function auditMode() {
  *   * state-first: balance + supply come from chain state, so history-plugin
  *     lag delays ATTRIBUTION, never DETECTION;
  *   * attribution: post-genesis transfers-in FIFO-paired against engine
- *     issues (issue k consumed deposit k in arrival order);
+ *     issues (issue k consumed deposit k in arrival order); the history walk
+ *     is supplemented by a block-log tail so history-plugin lag (minutes on
+ *     api.steemit.com) never delays a deposit the state scan already sees;
  *   * memo = recipient (trimmed — real memos carry stray spaces); anything
  *     else is flagged unattributed, never guessed;
  *   * recipient must exist on L1 — an engine balance keyed to a non-existent
@@ -748,14 +834,32 @@ async function scanPendingDeposits() {
   const balance = acct ? round3(l1SteemToNumber(acct.balance)) : 0;
   const excess = round3(balance - supply);
   const base = { balance, supply, excess };
-  if (excess < 0) return { ...base, pending: [], pendingSum: 0, anomalies: [], shortfall: true };
-  if (excess === 0) return { ...base, pending: [], pendingSum: 0, anomalies: [], shortfall: false };
+  const noAttribution = { history: 0, tailScanned: 0, tailAdded: 0 };
+  if (excess < 0) return { ...base, pending: [], pendingSum: 0, anomalies: [], shortfall: true, attribution: noAttribution };
+  if (excess === 0) return { ...base, pending: [], pendingSum: 0, anomalies: [], shortfall: false, attribution: noAttribution };
 
   const anomalies = [];
   const { rows } = await l1TransferHistory(ACCOUNT);
-  const deposits = rows
-    .filter((r) => r.to === ACCOUNT && (OP_ID !== 'sce-mainnet1' || r.index > BRIDGE_GENESIS_L1_INDEX))
-    .sort((a, b) => a.index - b.index);
+  // attribution source 2 — the block-log tail (covers history-plugin lag;
+  // see l1BlockTailTransfers). Tail rows are newer than every history row
+  // (the history walk is contiguous from its newest entry), so they append.
+  const tail = await l1BlockTailTransfers(ACCOUNT, excess, rows);
+  const knownTx = new Set(rows.map((r) => r.txId).filter(Boolean));
+  const extra = tail.rows.filter((r) => !knownTx.has(r.txId));
+  const merged = extra.length ? [...rows, ...extra] : rows;
+  const attribution = { history: rows.length, tailScanned: tail.scanned, tailAdded: extra.length };
+  const isTailRow = (r) => r.index === null || r.index === undefined;
+  const deposits = merged
+    .filter((r) => {
+      if (r.to !== ACCOUNT) return false;
+      if (isTailRow(r)) return true; // recent by construction (depth-capped)
+      return OP_ID !== 'sce-mainnet1' || r.index > BRIDGE_GENESIS_L1_INDEX;
+    })
+    .sort((a, b) => {
+      if (isTailRow(a) !== isTailRow(b)) return isTailRow(a) ? 1 : -1; // history first
+      if (!isTailRow(a)) return a.index - b.index;
+      return a.block - b.block || a.opInTx - b.opInTx || String(a.txId).localeCompare(String(b.txId));
+    });
   const { ops } = await fetchEngineOps(SYMBOL);
   const issues = ops
     .filter((o) => o.action === 'issue' && qtyOf(o) !== null)
@@ -802,7 +906,7 @@ async function scanPendingDeposits() {
         'refusing to attribute; investigate manually',
     );
   }
-  return { ...base, pending, pendingSum, anomalies, shortfall: false };
+  return { ...base, pending, pendingSum, anomalies, shortfall: false, attribution };
 }
 
 /**
@@ -867,7 +971,14 @@ async function pendingMode() {
   const report = await scanPendingDeposits();
   console.log(`  L1 balance : ${report.balance.toFixed(3)} STEEM`);
   console.log(`  supply     : ${report.supply.toFixed(3)} ${SYMBOL}`);
-  console.log(`  excess     : ${report.excess.toFixed(3)} (backing not yet wrapped)\n`);
+  console.log(`  excess     : ${report.excess.toFixed(3)} (backing not yet wrapped)`);
+  if (report.attribution && (report.attribution.tailScanned || report.attribution.tailAdded)) {
+    console.log(
+      `  attribution: history walk + block tail (${report.attribution.tailScanned} block(s) scanned, ` +
+        `${report.attribution.tailAdded} fresh transfer(s))`,
+    );
+  }
+  console.log('');
 
   if (report.shortfall) {
     console.log('  SHORTFALL: circulating supply exceeds L1 backing — do NOT issue anything; run --audit.');
@@ -975,15 +1086,15 @@ async function watchMode(args, keys) {
 
     for (const dep of report.pending) {
       if (dep.recipient) continue;
-      if (flagged.has(dep.index)) continue;
-      flagged.add(dep.index);
+      if (flagged.has(depKey(dep))) continue;
+      flagged.add(depKey(dep));
       console.log(
         `[${stamp}] unattributed deposit +${dep.amount} tx ${dep.txId}: ${dep.reason} — ` +
           'will NOT auto-issue it; handle manually.',
       );
     }
 
-    const next = report.pending.find((d) => d.recipient && !issuedIndices.has(d.index));
+    const next = report.pending.find((d) => d.recipient && !issuedIndices.has(depKey(d)));
     if (next) {
       // funds-first re-verified inside scanPendingDeposits on this very tick
       console.log(
@@ -993,7 +1104,7 @@ async function watchMode(args, keys) {
         label: `tokens.issue ${next.qty} ${SYMBOL} to ${next.recipient}`,
         payload: wiki('issue', { symbol: SYMBOL, to: next.recipient, quantity: next.qty }),
       });
-      issuedIndices.add(next.index);
+      issuedIndices.add(depKey(next));
       continue; // one action per tick — re-scan before the next
     }
 
@@ -1179,7 +1290,12 @@ async function main() {
   return seedMode(args, keys);
 }
 
-main().catch((error) => {
-  console.error(`Fatal: ${error && error.message ? error.message : error}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`Fatal: ${error && error.message ? error.message : error}`);
+    process.exit(1);
+  });
+}
+
+// exported read-only for validating the detectors outside the CLI
+module.exports = { scanPendingDeposits, l1BlockTailTransfers, depKey, sumQtys };
