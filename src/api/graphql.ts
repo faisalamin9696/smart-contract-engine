@@ -12,6 +12,7 @@ import {
   getParam,
   getToken,
   listMarketTrades,
+  tokenIcon,
   type EngineStore,
 } from '../state/store';
 import type { Indexer } from '../indexer/indexer';
@@ -210,6 +211,8 @@ const typeDefs = /* GraphQL */ `
     url: String!
     "Free-form metadata (plain string, at most 1000 chars)"
     metadata: String!
+    "Icon URL projected from metadata.icon (empty string when absent)"
+    icon: String!
     createdAtBlock: Int!
     createdAt: String!
   }
@@ -484,6 +487,11 @@ function clampOffset(offset: number | null | undefined): number {
 function buildResolvers() {
   return {
     JSON: JSONScalar,
+
+    // icon: read-side projection of the token's metadata string (tokenIcon()).
+    Token: {
+      icon: (parent: { metadata: string }) => tokenIcon(parent.metadata),
+    },
 
     Query: {
       collections: (_: unknown, args: { limit?: number; offset?: number }, ctx: GraphQLContext) =>

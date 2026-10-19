@@ -11,6 +11,7 @@ import {
   getParam,
   getToken,
   listMarketTrades,
+  tokenIcon,
   type EngineStore,
 } from '../state/store';
 import { computeStateChecksum } from './checksum';
@@ -317,7 +318,9 @@ export function createRestRouter(deps: RestDeps): Router {
     wrap(async (req, res) => {
       const { limit, offset } = page(req);
       const issuer = strParam(req, 'issuer');
-      const data = await store.listTokens({ issuer, limit, offset });
+      const rows = await store.listTokens({ issuer, limit, offset });
+      // icon is a read-side projection of metadata.icon (see tokenIcon()).
+      const data = rows.map((t) => ({ ...t, icon: tokenIcon(t.metadata) }));
       res.json({ data, meta: { limit, offset, count: data.length } });
     }),
   );
@@ -327,7 +330,7 @@ export function createRestRouter(deps: RestDeps): Router {
     wrap(async (req, res) => {
       const token = await getToken(store, req.params.symbol);
       if (!token) throw httpError(404, 'NOT_FOUND', 'token not found');
-      res.json({ data: token });
+      res.json({ data: { ...token, icon: tokenIcon(token.metadata) } });
     }),
   );
 

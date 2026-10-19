@@ -166,6 +166,35 @@ distribution happens from the treasury (`tokens.issue` stays free while `issueFe
   (seller == royalty recipient, treasury == buyer, ...) are summed into net
   deltas before writing, so the per-op conservation invariant holds exactly.
 
+## Token icon convention (`metadata.icon`)
+
+Icons ride on the existing free-form `metadata` string — **no consensus
+change**. The issuer sets it with the wiki-parity action that already ships:
+
+```json
+{ "contract": "tokens", "action": "updateMetadata",
+  "params": { "symbol": "SCE",
+              "metadata": { "icon": "https://cdn.example.com/sce-256.png" } } }
+```
+
+- **Authority**: token issuer only (`updateMetadata` is issuer-gated in the
+  contract); ≤ 1000 chars stringified, same as any metadata update.
+- **Convention**: `metadata.icon` is an **https URL** pointing at any
+  image host (CDN, Cloudinary, S3/Bunny, IPFS gateway…). Recommended
+  256×256 SVG/PNG. Other metadata keys (`website`, `explorer`, …) are
+  untouched by the icon flow.
+- **Read-side projection**: REST `/api/v1/tokens` (+ `/tokens/:symbol`) and
+  GraphQL `Token.icon` expose a parsed top-level `icon` field derived from
+  `metadata.icon` (`state/store.ts` → `tokenIcon()`). It is `''` when the
+  key is absent or metadata is malformed — a bad string can never break a
+  token list response. Frontends render a letter-avatar when `icon === ''`.
+- **Upload flow (Portal)**: the engine never stores files — it is a
+  deterministic state machine and its container storage is ephemeral. The
+  Portal's issuer panel uploads the image to object storage (Cloudinary /
+  S3 / Bunny / IPFS), receives the public URL, then Keychain-signs
+  `tokens.updateMetadata` merging `icon` into the token's current metadata
+  (read → merge → sign, never blind-overwrite other keys).
+
 ## Build order
 
 1. Migration `0003_tokens` (**additive** — no reset) + store layer

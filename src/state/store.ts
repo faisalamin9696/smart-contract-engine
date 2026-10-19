@@ -202,6 +202,27 @@ export async function getToken(store: EngineStore, symbol: string): Promise<Toke
   return raw === null ? null : TokenSchema.parse(raw);
 }
 
+/**
+ * Icon URL projected from a token's `metadata` string (the wiki/Hive-Engine
+ * `metadata.icon` convention — issuer sets it via `tokens.updateMetadata`).
+ * Read-side only: metadata stays free-form on the consensus row; this parse
+ * gives REST/GraphQL consumers a stable `icon` field that is '' when absent
+ * or malformed, so a bad metadata string can never break a token list.
+ */
+export function tokenIcon(metadata: string): string {
+  if (!metadata) return '';
+  try {
+    const parsed: unknown = JSON.parse(metadata);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const icon = (parsed as Record<string, unknown>).icon;
+      if (typeof icon === 'string') return icon;
+    }
+  } catch {
+    /* malformed metadata — no icon */
+  }
+  return '';
+}
+
 export async function getBalance(
   store: EngineStore,
   account: string,

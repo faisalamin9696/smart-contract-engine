@@ -330,10 +330,11 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
       maxSupply: '0', // 0 = unlimited
       supply: '1000',
       issuer: 'alice',
+      icon: '', // read-side projection of empty metadata
     });
 
     const token = await getJson(`${base}/api/v1/tokens/SCE`);
-    expect(token.data).toMatchObject({ symbol: 'SCE', metadata: '' });
+    expect(token.data).toMatchObject({ symbol: 'SCE', metadata: '', icon: '' });
 
     const unknown = await fetch(`${base}/api/v1/tokens/NOPE`);
     expect(unknown.status).toBe(404);
@@ -471,6 +472,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
         token(symbol: "SCE") {
           name
           metadata
+          icon
         }
         balances(account: "bob") {
           account
@@ -501,7 +503,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
         { symbol: 'GLD', precision: 2, supply: '100', maxSupply: '0', issuer: 'alice' },
         { symbol: 'SCE', precision: 3, supply: '1000', maxSupply: '0', issuer: 'alice' },
       ],
-      token: { name: 'Smart Contract Engine', metadata: '' },
+      token: { name: 'Smart Contract Engine', metadata: '', icon: '' },
       balances: [
         { account: 'bob', symbol: 'GLD', quantity: '4' },
         { account: 'bob', symbol: 'SCE', quantity: '992' },
