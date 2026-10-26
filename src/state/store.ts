@@ -59,6 +59,11 @@ export interface BalanceFilter {
 export interface ListBalancesQuery extends BalanceFilter {
   limit: number;
   offset: number;
+  /**
+   * Row order: 'account' (default — the keyed order existing callers expect) or
+   * 'quantity' (biggest holder first — the holders view a token page renders).
+   */
+  order?: 'account' | 'quantity';
 }
 
 export interface ListOrdersQuery {

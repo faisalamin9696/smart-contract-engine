@@ -620,9 +620,34 @@ export class PrismaStateStore implements EngineStore {
   }
 
   async listBalances(q: ListBalancesQuery): Promise<Balance[]> {
+    // Holders view (symbol-scoped, no account): drop the zero rows the engine
+    // retains after a full burn — they are not holders. Account-scoped reads
+    // keep them (the account's own page must show the row it really has).
+    const symbolOnly = !q.account && !!q.symbol;
+
+    if (q.order === 'quantity') {
+      // `quantity` is a TEXT column (migration 0003), so a lexicographic
+      // ORDER BY lies ("9" > "10"). Engine quantities are canonical decimal
+      // strings — no leading zeros, no exponent, one representation per value
+      // within a symbol — so ordering by string length first, then the string
+      // itself, is an exact numeric order. Ties break by account/symbol so
+      // paging is deterministic.
+      const conditions: Prisma.Sql[] = [];
+      if (q.symbol) conditions.push(Prisma.sql`symbol = ${q.symbol}`);
+      if (symbolOnly) conditions.push(Prisma.sql`quantity <> '0'`);
+      const where =
+        conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
+      const rows = await this.client.$queryRaw<PrismaBalanceRow[]>`
+        SELECT * FROM "BalanceRecord" ${where}
+        ORDER BY length(quantity) DESC, quantity DESC, account ASC, symbol ASC
+        LIMIT ${q.limit} OFFSET ${q.offset}`;
+      return rows.map(balanceFromRow);
+    }
+
     const where: Prisma.BalanceRecordWhereInput = {};
     if (q.account) where.account = q.account;
     if (q.symbol) where.symbol = q.symbol;
+    if (symbolOnly) where.quantity = { not: '0' };
     const rows = await this.client.balanceRecord.findMany({
       where,
       orderBy: [{ account: 'asc' }, { symbol: 'asc' }],
@@ -636,6 +661,9 @@ export class PrismaStateStore implements EngineStore {
     const where: Prisma.BalanceRecordWhereInput = {};
     if (q.account) where.account = q.account;
     if (q.symbol) where.symbol = q.symbol;
+    // Mirror listBalances: a holders count (symbol-scoped, no account) must not
+    // include the zero rows, or meta.total would exceed the walkable pages.
+    if (!q.account && q.symbol) where.quantity = { not: '0' };
     return this.client.balanceRecord.count({ where });
   }
 

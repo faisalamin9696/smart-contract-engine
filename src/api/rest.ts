@@ -338,10 +338,19 @@ export function createRestRouter(deps: RestDeps): Router {
     '/balances',
     wrap(async (req, res) => {
       const account = strParam(req, 'account');
-      if (!account) throw httpError(400, 'BAD_REQUEST', 'account is required');
       const symbol = strParam(req, 'symbol');
+      // Symbol-scoped reads are the holders-list view (portal token pages);
+      // account-less *unscoped* reads would dump every balance row — refuse them.
+      if (!account && !symbol) {
+        throw httpError(400, 'BAD_REQUEST', 'account or symbol is required');
+      }
+      const orderParam = strParam(req, 'order');
+      if (orderParam !== undefined && orderParam !== 'account' && orderParam !== 'quantity') {
+        throw httpError(400, 'BAD_REQUEST', "order must be 'account' or 'quantity'");
+      }
+      const order = orderParam ?? 'account';
       const { limit, offset } = page(req);
-      const data = await store.listBalances({ account, symbol, limit, offset });
+      const data = await store.listBalances({ account, symbol, order, limit, offset });
       const total = await store.countBalances({ account, symbol });
       res.json({ data, meta: { limit, offset, total } });
     }),

@@ -90,6 +90,15 @@ fills are never split across pages):
 ```
 
 ### Balances — `GET /api/v1/balances?account=<name>[&symbol=SYMBOL]`
+### Holders — `GET /api/v1/balances?symbol=<SYMBOL>[&order=quantity][&limit=][&offset=]`
+
+Either `account` or `symbol` is required (`400` when both are missing —
+there is no full-table dump). With `symbol` alone the response is the
+**holders list**: zero-quantity rows (left behind by a full burn) are
+excluded from both `data` and `meta.total`. Add `order=quantity` to sort
+biggest holder first (default `order=account` — alphabetical by account);
+page with `limit` (max 100) / `offset`, `meta.total` gives the exact
+holder count for "page N of M".
 
 The escrowed portion of a user's balance is **not** in `quantity` — it lives
 on their open orders (`escrow` field). `quantity + Σ(escrow of OPEN orders)`

@@ -99,6 +99,22 @@ const marketCancelTx = customJsonTx(
   { contract: 'market', action: 'cancel', params: { orderId: 'MKT-00000001' } },
   active('alice'),
 );
+// holders-list fixture (symbol-wide /balances): numeric sizes that lexicographic
+// order gets wrong ("9" > "10" > "100.5" as strings) + one full burn, which
+// leaves a zero-quantity row the engine keeps but holders lists must exclude.
+const hldCreateTx = customJsonTx(
+  { contract: 'tokens', action: 'create', params: { symbol: 'HLD', name: 'Holders Fixture', precision: 2 } },
+  active('alice'),
+);
+const hldIssue = (to: string, quantity: string) =>
+  customJsonTx(
+    { contract: 'tokens', action: 'issue', params: { symbol: 'HLD', to, quantity } },
+    active('alice'),
+  );
+const hldBurnGhostmanTx = customJsonTx(
+  { contract: 'tokens', action: 'burn', params: { symbol: 'HLD', quantity: '9' } },
+  active('ghostman'),
+);
 
 /* ------------------------------------------------------------ tiny ws client */
 
@@ -191,7 +207,24 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     rpc.mine({ transactions: [mintBobTx] });
     rpc.mine({ transactions: [transferTx] });
     rpc.mine({ transactions: [sceTx, issueTx, listTx] });
-    rpc.mine({ transactions: [gldCreateTx, gldIssueTx, marketSellTx, marketBuyTx] });
+    rpc.mine({
+      transactions: [
+        gldCreateTx,
+        gldIssueTx,
+        marketSellTx,
+        marketBuyTx,
+        // HLD holders fixture rides the same block so cursorHeight stays 5:
+        // numeric sizes that lexicographic order gets wrong + one full burn
+        // (leaves the zero-quantity row holders lists must exclude).
+        hldCreateTx,
+        hldIssue('carol', '100.5'),
+        hldIssue('gamekey', '10'),
+        hldIssue('alice', '50'),
+        hldIssue('zeroman', '9'),
+        hldIssue('ghostman', '9'),
+        hldBurnGhostmanTx, // ghostman's 9 → row stays at quantity '0'
+      ],
+    });
 
     store = new MemoryStore();
     sandbox = await createSandbox({ provider: 'node-vm', timeoutMs: 1000, memoryLimitMb: 128 });
@@ -309,11 +342,12 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
 
     const logs = await getJson(`${base}/api/v1/logs?actor=alice`);
     // alice created the RAID collection, created both price/base tokens, issued both
-    // test supplies and placed the resting market sell — every row an applied op
-    expect(logs.data).toHaveLength(6);
+    // test supplies and placed the resting market sell, then created HLD and issued
+    // its holders fixture — every row an applied op
+    expect(logs.data).toHaveLength(12);
     expect(logs.data.every((l: { status: string }) => l.status === 'APPLIED')).toBe(true);
-    expect(logs.data.filter((l: { action: string }) => l.action === 'create')).toHaveLength(3);
-    expect(logs.data.some((l: { action: string }) => l.action === 'issue')).toBe(true);
+    expect(logs.data.filter((l: { action: string }) => l.action === 'create')).toHaveLength(4);
+    expect(logs.data.filter((l: { action: string }) => l.action === 'issue')).toHaveLength(7);
 
     const block = await getJson(`${base}/api/v1/blocks/2`);
     expect(block.data).toMatchObject({ height: 2, txCount: 1 });
@@ -321,9 +355,9 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
 
   it('reads fungible tokens, balances and params over REST', async () => {
     const tokens = await getJson(`${base}/api/v1/tokens`);
-    expect(tokens.data).toHaveLength(2);
-    expect(tokens.data.map((t: { symbol: string }) => t.symbol)).toEqual(['GLD', 'SCE']);
-    expect(tokens.data[1]).toMatchObject({
+    expect(tokens.data).toHaveLength(3);
+    expect(tokens.data.map((t: { symbol: string }) => t.symbol)).toEqual(['GLD', 'HLD', 'SCE']);
+    expect(tokens.data[2]).toMatchObject({
       symbol: 'SCE',
       name: 'Smart Contract Engine',
       precision: 3,
@@ -359,6 +393,61 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     });
   });
 
+  it('lists token holders by symbol with numeric ordering, paging and the zero-row rule', async () => {
+    // HLD fixture: carol 100.5, alice 50, gamekey 10, zeroman 9, ghostman 0 (burned).
+    // Lexicographic order would say "9" > "50" > "100.5" — the page must be numeric.
+
+    // (a) symbol-only + order=quantity: biggest holder first, exact decimal compare
+    const holders = await getJson(`${base}/api/v1/balances?symbol=HLD&order=quantity`);
+    expect(holders.data.map((b: { account: string }) => b.account)).toEqual([
+      'carol',
+      'alice',
+      'gamekey',
+      'zeroman',
+    ]);
+    expect(holders.data.map((b: { quantity: string }) => b.quantity)).toEqual(['100.5', '50', '10', '9']);
+
+    // (b) ghostman's zero row: excluded from the holders list …
+    expect(holders.data.some((b: { account: string }) => b.account === 'ghostman')).toBe(false);
+    // (d) meta.total = the full non-zero holder count (not the raw row count)
+    expect(holders.meta.total).toBe(4);
+    expect(holders.meta.limit).toBe(20);
+    expect(holders.meta.offset).toBe(0);
+
+    // … but included on the account-scoped read, exactly as before
+    const ghost = await getJson(`${base}/api/v1/balances?account=ghostman&symbol=HLD`);
+    expect(ghost.data).toEqual([{ account: 'ghostman', symbol: 'HLD', quantity: '0' }]);
+    expect(ghost.meta.total).toBe(1);
+
+    // (d) two consecutive pages: no overlap, no skip, stable total
+    const page1 = await getJson(`${base}/api/v1/balances?symbol=HLD&order=quantity&limit=2&offset=0`);
+    const page2 = await getJson(`${base}/api/v1/balances?symbol=HLD&order=quantity&limit=2&offset=2`);
+    expect(page1.data.map((b: { account: string }) => b.account)).toEqual(['carol', 'alice']);
+    expect(page2.data.map((b: { account: string }) => b.account)).toEqual(['gamekey', 'zeroman']);
+    expect(page1.meta.total).toBe(4);
+    expect(page2.meta.total).toBe(4);
+
+    // symbol-only defaults to the account order (byte-compatible with today)
+    const byAccount = await getJson(`${base}/api/v1/balances?symbol=HLD`);
+    expect(byAccount.data.map((b: { account: string }) => b.account)).toEqual([
+      'alice',
+      'carol',
+      'gamekey',
+      'zeroman',
+    ]);
+
+    // (c) neither account nor symbol → 400, never a full-table dump
+    const unscoped = await fetch(`${base}/api/v1/balances`);
+    expect(unscoped.status).toBe(400);
+    expect(await unscoped.json()).toMatchObject({
+      error: { code: 'BAD_REQUEST', message: 'account or symbol is required' },
+    });
+
+    // unknown order values are rejected, not silently coerced
+    const badOrder = await fetch(`${base}/api/v1/balances?symbol=HLD&order=bogus`);
+    expect(badOrder.status).toBe(400);
+  });
+
   it('rejects bad input and unknown routes with JSON errors', async () => {
     const missing = await fetch(`${base}/api/v1/instances/RAID-99999999`);
     expect(missing.status).toBe(404);
@@ -370,7 +459,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     const badLimit = await fetch(`${base}/api/v1/collections?limit=0`);
     expect(badLimit.status).toBe(400);
 
-    // balances is account-scoped by design — no global dump
+    // balances requires a scope — account or symbol, never a global dump
     const noAccount = await fetch(`${base}/api/v1/balances`);
     expect(noAccount.status).toBe(400);
     expect(await noAccount.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
@@ -501,6 +590,7 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     expect(body.data).toMatchObject({
       tokens: [
         { symbol: 'GLD', precision: 2, supply: '100', maxSupply: '0', issuer: 'alice' },
+        { symbol: 'HLD', precision: 2, supply: '169.5', maxSupply: '0', issuer: 'alice' },
         { symbol: 'SCE', precision: 3, supply: '1000', maxSupply: '0', issuer: 'alice' },
       ],
       token: { name: 'Smart Contract Engine', metadata: '', icon: '' },

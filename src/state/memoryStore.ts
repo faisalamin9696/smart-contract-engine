@@ -1,3 +1,4 @@
+import { bn } from '../utils/bn';
 import {
   BalanceSchema,
   BookOrderSchema,
@@ -179,19 +180,39 @@ export class MemoryStore implements EngineStore {
   }
 
   async listBalances(q: ListBalancesQuery): Promise<Balance[]> {
+    // Same semantics as PrismaStateStore: a holders view (symbol-scoped, no
+    // account) excludes the zero rows a full burn leaves behind; account-scoped
+    // reads keep them.
+    const symbolOnly = !q.account && !!q.symbol;
     let rows = [...this.kv.balance.entries()].map(([, v]) => BalanceSchema.parse(v));
     if (q.account) rows = rows.filter((r) => r.account === q.account);
     if (q.symbol) rows = rows.filter((r) => r.symbol === q.symbol);
-    rows.sort((a, b) => a.account.localeCompare(b.account) || a.symbol.localeCompare(b.symbol));
+    if (symbolOnly) rows = rows.filter((r) => r.quantity !== '0');
+    if (q.order === 'quantity') {
+      // BigNumber compare — never Number(): "100.5" must outrank "96" even
+      // though lexicographic order says otherwise. Ties break by account then
+      // symbol, exactly like the Postgres ORDER BY, so pages are identical
+      // across both back-ends.
+      rows.sort((a, b) => {
+        const byQuantity = bn(b.quantity).comparedTo(a.quantity) ?? 0;
+        if (byQuantity !== 0) return byQuantity;
+        return a.account.localeCompare(b.account) || a.symbol.localeCompare(b.symbol);
+      });
+    } else {
+      rows.sort((a, b) => a.account.localeCompare(b.account) || a.symbol.localeCompare(b.symbol));
+    }
     return rows.slice(q.offset, q.offset + q.limit);
   }
 
   async countBalances(q: BalanceFilter): Promise<number> {
+    // Mirrors listBalances' zero-row rule so meta.total matches the page walk.
+    const symbolOnly = !q.account && !!q.symbol;
     let count = 0;
     for (const raw of this.kv.balance.values()) {
       const row = BalanceSchema.parse(raw);
       if (q.account && row.account !== q.account) continue;
       if (q.symbol && row.symbol !== q.symbol) continue;
+      if (symbolOnly && row.quantity === '0') continue;
       count += 1;
     }
     return count;

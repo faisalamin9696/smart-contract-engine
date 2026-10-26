@@ -392,6 +392,49 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     );
   });
 
+  it('matches MemoryStore on symbol-wide holder reads (numeric order, zero-row rule)', async () => {
+    // Symbol-scoped holder listing (REST /balances?symbol=&order=quantity).
+    // The Postgres path sorts via raw SQL on a TEXT column — length-first,
+    // which is exact for canonical decimal strings — while MemoryStore sorts
+    // with BigNumber; both must produce the same numeric-descending pages, and
+    // both must drop the zero row (symbol-only) while keeping it (account-scoped).
+    const fixture = async (target: EngineStore): Promise<void> => {
+      await target.put('balance', 'tstbig:TSQ', balance('tstbig', 'TSQ', '100.5'));
+      await target.put('balance', 'tstmid:TSQ', balance('tstmid', 'TSQ', '10'));
+      await target.put('balance', 'tstsmall:TSQ', balance('tstsmall', 'TSQ', '9'));
+      await target.put('balance', 'tstgone:TSQ', balance('tstgone', 'TSQ', '0'));
+    };
+    await fixture(store);
+    await fixture(reference);
+
+    const query = { symbol: 'TSQ', order: 'quantity' as const, limit: 10, offset: 0 };
+    const fromPostgres = await store.listBalances(query);
+    // Lexicographic order would say "9" > "10" > "100.5" — pin the numeric order.
+    expect(fromPostgres.map((b) => b.quantity)).toEqual(['100.5', '10', '9']);
+    expect(fromPostgres.map((b) => b.account)).toEqual(['tstbig', 'tstmid', 'tstsmall']);
+    expect(fromPostgres).toEqual(await reference.listBalances(query));
+
+    // meta.total parity: the count drops the zero row too
+    expect(await store.countBalances({ symbol: 'TSQ' })).toBe(3);
+    expect(await reference.countBalances({ symbol: 'TSQ' })).toBe(3);
+
+    // default account order on a symbol-only read also excludes the zero row
+    expect((await store.listBalances({ symbol: 'TSQ', limit: 10, offset: 0 })).map((b) => b.account)).toEqual(
+      (await reference.listBalances({ symbol: 'TSQ', limit: 10, offset: 0 })).map((b) => b.account),
+    );
+    expect((await store.listBalances({ symbol: 'TSQ', limit: 10, offset: 0 })).map((b) => b.account)).toEqual([
+      'tstbig',
+      'tstmid',
+      'tstsmall',
+    ]);
+
+    // account-scoped reads keep the zero row, on both back-ends
+    const gone = { account: 'tstgone', symbol: 'TSQ', limit: 10, offset: 0 };
+    expect(await store.listBalances(gone)).toEqual([balance('tstgone', 'TSQ', '0')]);
+    expect(await reference.listBalances(gone)).toEqual([balance('tstgone', 'TSQ', '0')]);
+    expect(await store.countBalances({ account: 'tstgone', symbol: 'TSQ' })).toBe(1);
+  });
+
   it('persists blocks, logs and the undo journal with MemoryStore semantics', async () => {
     await store.putBlock(block(H1, 'a'.repeat(40)));
     await store.putBlock(block(H1 + 1, 'b'.repeat(40)));
