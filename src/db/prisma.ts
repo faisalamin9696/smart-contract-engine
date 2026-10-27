@@ -15,7 +15,8 @@ export function createPrismaClient(databaseUrl?: string | null): PrismaClient {
   );
 }
 
-/** Cheap liveness probe used by the health endpoint. */
+/** Cheap boot-time connectivity probe (called from src/index.ts); the health
+ * endpoint tracks store reachability through the indexer cursor read instead. */
 export async function pingDatabase(client: PrismaClient): Promise<boolean> {
   try {
     await client.$queryRaw`SELECT 1`;

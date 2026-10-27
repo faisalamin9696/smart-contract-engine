@@ -26,6 +26,13 @@ COPY src ./src
 RUN npx prisma generate
 RUN npm run build
 
+# Ship only the production tree to the runtime stage. prisma is now a dependency
+# (the entrypoint executes `npx prisma migrate deploy` on every boot) so it
+# survives the prune, while jest/tsx/typescript and the rest of the dev tree are
+# dropped: the image must contain what docs/SECURITY.md and osv-scanner.toml
+# say it contains, and what `npm audit --omit=dev` audits.
+RUN npm prune --omit=dev
+
 # ---- runtime stage ------------------------------------------------------------
 FROM node:24-bookworm-slim AS runtime
 

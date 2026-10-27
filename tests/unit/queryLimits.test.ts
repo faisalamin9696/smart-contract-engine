@@ -1,6 +1,14 @@
-import { getIntrospectionQuery, parse } from 'graphql';
+import { buildSchema, getIntrospectionQuery, parse } from 'graphql';
 
-import { analyzeQuery, MAX_QUERY_ALIASES, MAX_QUERY_DEPTH, MAX_QUERY_DIRECTIVES } from '../../src/api/graphql';
+import {
+  analyzeQuery,
+  maxListRowsOnAnyPath,
+  MAX_QUERY_ALIASES,
+  MAX_QUERY_DEPTH,
+  MAX_QUERY_DIRECTIVES,
+  MAX_REQUEST_LIST_ROWS,
+  typeDefs,
+} from '../../src/api/graphql';
 
 /**
  * GraphQL query-cost analysis (SECURITY.md → "Query complexity").
@@ -83,5 +91,44 @@ describe('analyzeQuery', () => {
     expect(MAX_QUERY_DEPTH).toBeGreaterThanOrEqual(10);
     expect(MAX_QUERY_ALIASES).toBeGreaterThanOrEqual(10);
     expect(MAX_QUERY_DIRECTIVES).toBeGreaterThanOrEqual(10);
+  });
+});
+
+describe('maxListRowsOnAnyPath (row fan-out budget)', () => {
+  const schema = buildSchema(typeDefs);
+  const rows = (query: string) => maxListRowsOnAnyPath(parse(query), schema);
+
+  it('prices omitted limits at the resolver default (20 x 20)', () => {
+    expect(rows('{ collections { instances { id } } }')).toBe(20 * 20);
+  });
+
+  it('prices explicit limits at the clamped literal', () => {
+    expect(rows('{ collections(limit: 100) { instances(limit: 100) { id } } }')).toBe(100 * 100);
+  });
+
+  it('prices a limit variable at the worst case (MAX_LIMIT)', () => {
+    expect(rows('query ($n: Int) { collections(limit: $n) { symbol } }')).toBe(100);
+  });
+
+  it('rejects the cyclic fan-out class: nested list levels multiply', () => {
+    const bomb =
+      '{ collections(limit: 100) { instances(limit: 100) { collection { instances(limit: 100) { collection { instances(limit: 100) { collection { instances(limit: 100) { collection { instances(limit: 100) { id } } } } } } } } } } }';
+    expect(rows(bomb)).toBeGreaterThan(MAX_REQUEST_LIST_ROWS);
+  });
+
+  it('leaves flat and singleton queries at 1', () => {
+    expect(rows('{ status { storage cursorHeight } }')).toBe(1);
+  });
+
+  it('does not price introspection (no limit args — schema-bounded)', () => {
+    expect(rows(getIntrospectionQuery())).toBe(1);
+  });
+
+  it('honours fragment spreads like analyzeQuery does', () => {
+    const q = `
+      query { ...pair }
+      fragment pair on Query { collections { instances { id } } }
+    `;
+    expect(rows(q)).toBe(20 * 20);
   });
 });

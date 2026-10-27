@@ -10,6 +10,13 @@ import type { EngineStore } from './store';
  * (the matcher must see every crossing order to be deterministic).
  */
 const MAX_BOOK_PREFETCH = 10_000;
+/**
+ * Absolute ceiling on a prefetched pair book. Paging runs to completion so the
+ * matcher never sees a silently truncated view; a book beyond this bound fails
+ * the op loudly instead (failing loudly beats matching a partial view — the
+ * rule this module's own header comment states).
+ */
+const BOOK_PREFETCH_HARD_CAP = 200_000;
 
 /**
  * Synthetic snapshot key carrying a signer's current open-order count (fetched with
@@ -130,14 +137,32 @@ export async function buildSnapshot(
       if (symbol && quote) {
         need.token.add(symbol);
         need.token.add(quote);
-        const book = await store.listBookOrders({
-          symbol,
-          quote,
-          status: 'OPEN',
-          limit: MAX_BOOK_PREFETCH,
-          offset: 0,
-        });
-        for (const bookOrder of book) need.marketOrder.add(bookOrder.id);
+        // Page the pair book to completion: the matcher may only read prefetched
+        // rows, so any silent truncation at MAX_BOOK_PREFETCH would hide newer
+        // resting orders from matching entirely (starved escrow) and deny takers
+        // crossing liquidity the REST book still advertises as OPEN. 101 accounts
+        // x 100 open orders (the per-account cap is pair-agnostic) already exceeds
+        // the old single-call window deterministically.
+        let fetched = 0;
+        let bookOffset = 0;
+        for (;;) {
+          const page = await store.listBookOrders({
+            symbol,
+            quote,
+            status: 'OPEN',
+            limit: MAX_BOOK_PREFETCH,
+            offset: bookOffset,
+          });
+          fetched += page.length;
+          if (fetched > BOOK_PREFETCH_HARD_CAP) {
+            throw new Error(
+              `market book for ${symbol}/${quote} exceeds ${BOOK_PREFETCH_HARD_CAP} open orders — refusing to match on a partial view`,
+            );
+          }
+          for (const bookOrder of page) need.marketOrder.add(bookOrder.id);
+          if (page.length < MAX_BOOK_PREFETCH) break;
+          bookOffset += MAX_BOOK_PREFETCH;
+        }
       }
       need.meta.add('market_order_seq');
       need.param.add(PARAM_KEY);

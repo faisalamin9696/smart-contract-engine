@@ -70,7 +70,9 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
   app.disable('x-powered-by');
   // Recover the real client IP from X-Forwarded-For trusting exactly one proxy hop.
   // `true` (trust every hop) would let a client spoof its way past the rate limiter by
-  // prepending its own X-Forwarded-For values; a hop count cannot be spoofed.
+  // prepending its own X-Forwarded-For values; a fixed hop count cannot be spoofed
+  // behind that appending proxy — but with DIRECT exposure (no proxy in front) the
+  // client's own rightmost entry becomes req.ip, so set TRUST_PROXY_HOPS=0 there.
   app.set('trust proxy', config.trustProxyHops);
 
   // Baseline security headers on every response (including errors) — this is a
@@ -97,15 +99,27 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
 
   app.get('/health', async (_req: Request, res: Response) => {
     const status = indexer.status() as { running: boolean; headHeight: number; sandbox: string; opId: string };
-    const cursor = await indexer.cursor().catch(() => null);
-    res.json({
-      status: 'ok',
+    let storeError = false;
+    const cursor = await indexer.cursor().catch(() => {
+      storeError = true;
+      return null;
+    });
+    // Truthful probe: 200 only while ingestion is running AND the store answers.
+    // A wedged engine (DeepForkError -> running=false with the process alive) or
+    // a post-boot database outage previously reported status:'ok' forever, and the
+    // shipped compose healthcheck keys solely on this status code — 503 lets
+    // supervision act. A fresh database (cursor null, no error, running=true)
+    // stays 200 so first boot does not flap during the healthcheck grace window.
+    const ok = status.running && !storeError;
+    res.status(ok ? 200 : 503).json({
+      status: ok ? 'ok' : 'degraded',
       uptimeSeconds: Math.round(process.uptime()),
       storage: deps.storage,
       indexer: {
         running: status.running,
         headHeight: status.headHeight,
         cursorHeight: cursor?.height ?? 0,
+        storeError,
         sandbox: status.sandbox,
         opId: status.opId,
       },

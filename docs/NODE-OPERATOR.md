@@ -186,9 +186,11 @@ No agent needed — the engine answers its own health over HTTP. **Alert on thes
 | process | host | RSS growth without bound, restart loops |
 
 ```bash
-# cursor-lag probe: exits 1 when > 100 blocks behind or the API is down
+# health + cursor-lag probe: exits 1 when the API is down, when /health reports
+# degraded (503 — engine halted or store unreachable; -sf fails on non-2xx), or
+# when the cursor lags > 100 blocks. Fields nest under `indexer`.
 h=$(curl -sf localhost:4000/health) || exit 1
-node -e 'const h=JSON.parse(process.argv[1]);process.exit(h.headHeight-h.cursorHeight>100?1:0)' "$h"
+node -e 'const i=JSON.parse(process.argv[1]).indexer;process.exit(i.headHeight-i.cursorHeight>100?1:0)' "$h"
 ```
 
 **Capacity baseline** (head-following node, honest numbers):

@@ -304,7 +304,43 @@ export class FailoverRpc implements SteemRpc {
 
   async getBlock(height: number): Promise<RawBlock | null> {
     const { value: block, index } = await this.requestFrom<RawBlock | null>('condenser_api', 'get_block', [height]);
-    if (block == null) return null;
+    if (block == null) {
+      // A negative answer is consensus-relevant testimony, not a free success.
+      // Inside the quorum window a witness must corroborate that the height is
+      // genuinely missing before the indexer may treat it as such; a peer that
+      // denies an existing block is rotated out like any other liar. (requestFrom
+      // already markSuccess'd the null-er — without this corroboration one peer's
+      // bare null could steer the reorg ancestor walk into a false fail-closed
+      // halt, or pin itself preferred and stall the tip check forever.)
+      if (this.quorumEnabledFor(height)) {
+        const order = this.witnessOrder([index]);
+        const first = order[0];
+        if (first !== undefined) {
+          const verdict = await this.witnessVerdict(first, height);
+          if (verdict !== null && verdict.block !== null) {
+            // A witness holds the block: the null-er denied an existing height.
+            this.markFailure(
+              this.endpoints[index],
+              new RpcError(`endpoint denied existing block ${height}`, 'QUORUM_NULL_DISAGREE'),
+              `get_block#${height}`,
+            );
+            this.log.warn('rpc endpoint denied an existing block', {
+              endpoint: this.endpoints[index].url,
+              height,
+            });
+            return await this.quorumVerify(height, verdict.block, first);
+          }
+          if (verdict !== null && verdict.fp === 'missing') {
+            // Independent, non-lagging agreement that the height does not exist.
+            this.markSuccess(this.endpoints[first]);
+            return null;
+          }
+          // No usable testimony (witness behind or transport-failed): the negative
+          // answer stands as before — witness failures were already logged.
+        }
+      }
+      return null;
+    }
     if (
       typeof block.block_id !== 'string' ||
       typeof block.previous !== 'string' ||
@@ -330,6 +366,23 @@ export class FailoverRpc implements SteemRpc {
     if (head === null || this.now() - head.at > QUORUM_HEAD_FRESH_MS) return false;
     // Deep-history sync is exempt: those heights are beyond the head window.
     return height >= head.height - this.quorumDepth;
+  }
+
+  /**
+   * Canonical fingerprint of a peer-supplied block, or null when the body is not
+   * canonical JSON (a fractional, over-wide, or non-finite number anywhere — the
+   * throw lives in blockFingerprint -> canonical.normalize). A canonicalisation
+   * failure is peer misbehaviour, not a transient error: callers must treat null
+   * exactly like any other malformed payload and mark the serving endpoint down,
+   * so one hostile peer cannot re-serve the same unpenalised throw on every retry
+   * while `preferred` keeps selecting it (the historical permanent ingestion wedge).
+   */
+  private safeFingerprint(block: RawBlock): string | null {
+    try {
+      return blockFingerprint(block);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -378,6 +431,45 @@ export class FailoverRpc implements SteemRpc {
     return res.value.head_block_number < height;
   }
 
+  /**
+   * One witness's testimony for a height: the fingerprint (cross-checkable) of its
+   * block, `missing` when a non-lagging witness says the height does not exist, or
+   * null when the witness could not testify (transport failure, lagging head,
+   * malformed or non-canonical body — each already logged/penalised here).
+   */
+  private async witnessVerdict(
+    index: number,
+    height: number,
+  ): Promise<{ fp: string; block: RawBlock | null } | null> {
+    const res = await this.callWitness<RawBlock | null>(index, 'condenser_api', 'get_block', [height], height);
+    if (!res.ok) return null; // transport failure — no testimony either way
+    const block = res.value;
+    if (block === null) {
+      // Distinguish "still syncing" from "claims this height does not exist".
+      if (await this.witnessIsBehind(index, height)) return null;
+      return { fp: 'missing', block: null };
+    }
+    if (
+      typeof block.block_id !== 'string' ||
+      typeof block.previous !== 'string' ||
+      typeof block.timestamp !== 'string' ||
+      typeof block.transaction_merkle_root !== 'string'
+    ) {
+      this.markFailure(this.endpoints[index], new RpcError('malformed witness block', 'BAD_RESPONSE'), 'get_block (witness)');
+      return null;
+    }
+    const fp = this.safeFingerprint(block);
+    if (fp === null) {
+      this.markFailure(
+        this.endpoints[index],
+        new RpcError('non-canonical witness block', 'BAD_RESPONSE'),
+        'get_block (witness)',
+      );
+      return null;
+    }
+    return { fp, block };
+  }
+
   private disagree(height: number, ...indices: number[]): never {
     for (const index of indices) {
       this.markFailure(
@@ -398,37 +490,25 @@ export class FailoverRpc implements SteemRpc {
    * disagreement pulls a third opinion (majority wins, dissenters are marked down);
    * an unresolvable split throws {@link RpcError} `QUORUM_DISAGREE` so the indexer
    * stalls loudly instead of applying a block one endpoint may have fabricated.
+   * A non-canonical primary body is penalised (BAD_RESPONSE) before verification so
+   * failover advances instead of repeating an unpenalised canonicalisation throw.
    */
   private async quorumVerify(height: number, primary: RawBlock, primaryIndex: number): Promise<RawBlock> {
     if (!this.quorumEnabledFor(height)) return primary;
-    const expected = blockFingerprint(primary);
+    const expected = this.safeFingerprint(primary);
+    if (expected === null) {
+      this.markFailure(
+        this.endpoints[primaryIndex],
+        new RpcError(`non-canonical block response at height ${height}`, 'BAD_RESPONSE'),
+        `get_block#${height}`,
+      );
+      throw new RpcError(`non-canonical block response at height ${height}`, 'BAD_RESPONSE');
+    }
     const order = this.witnessOrder([primaryIndex]);
     const first = order[0];
     if (first === undefined) return primary;
 
-    type Verdict = { fp: string; block: RawBlock | null };
-    const verdictFor = async (index: number): Promise<Verdict | null> => {
-      const res = await this.callWitness<RawBlock | null>(index, 'condenser_api', 'get_block', [height], height);
-      if (!res.ok) return null; // transport failure — no testimony either way
-      const block = res.value;
-      if (block === null) {
-        // Distinguish "still syncing" from "claims this height does not exist".
-        if (await this.witnessIsBehind(index, height)) return null;
-        return { fp: 'missing', block: null };
-      }
-      if (
-        typeof block.block_id !== 'string' ||
-        typeof block.previous !== 'string' ||
-        typeof block.timestamp !== 'string' ||
-        typeof block.transaction_merkle_root !== 'string'
-      ) {
-        this.markFailure(this.endpoints[index], new RpcError('malformed witness block', 'BAD_RESPONSE'), 'get_block (witness)');
-        return null;
-      }
-      return { fp: blockFingerprint(block), block };
-    };
-
-    const w1 = await verdictFor(first);
+    const w1 = await this.witnessVerdict(first, height);
     if (w1 === null) return primary; // no usable testimony — primary stands (already logged)
     if (w1.fp === expected) {
       this.markSuccess(this.endpoints[first]);
@@ -439,7 +519,7 @@ export class FailoverRpc implements SteemRpc {
     const second = order[1];
     if (second === undefined) return this.disagree(height, primaryIndex, first);
 
-    const w2 = await verdictFor(second);
+    const w2 = await this.witnessVerdict(second, height);
     if (w2 === null) return this.disagree(height, primaryIndex, first);
 
     if (w2.fp === expected) {

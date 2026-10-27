@@ -276,11 +276,14 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
 
   it('serves a health probe and engine status', async () => {
     const health = await fetch(`${base}/health`);
-    expect(health.status).toBe(200);
+    // The fixture never starts the indexer loop: running=false must surface as
+    // degraded (503) so the shipped healthcheck and orchestrators can act — the
+    // old always-200 probe could never report a halted engine or a failed store.
+    expect(health.status).toBe(503);
     expect(await health.json()).toMatchObject({
-      status: 'ok',
+      status: 'degraded',
       storage: 'memory',
-      indexer: { running: false, cursorHeight: 5, opId: 'sce-mainnet1' },
+      indexer: { running: false, cursorHeight: 5, storeError: false, opId: 'sce-mainnet1' },
     });
 
     const status = await fetch(`${base}/api/v1/status`);

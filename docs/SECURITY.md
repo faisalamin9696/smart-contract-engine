@@ -128,14 +128,18 @@ An indexer must not accept a block from a single possibly-lying RPC endpoint:
 * **Per-IP token-bucket rate limiting** (`RATE_LIMIT_RPM`, default 600/min,
   `/health` exempt) with spoof-proof client IPs (`TRUST_PROXY_HOPS` — a fixed hop
   count instead of `trust proxy: true`, which a client could defeat by prepending its
-  own `X-Forwarded-For`).
+  own `X-Forwarded-For`). Spoof-proofing assumes exactly one appending proxy hop;
+  with **direct exposure** (no proxy in front) set `TRUST_PROXY_HOPS=0`, otherwise
+  the client's own rightmost `X-Forwarded-For` entry becomes the bucket key.
 * Query/page limits are capped (100 rows), request bodies are capped (256 kB), WS has
   payload caps, a per-socket subscription cap (100), a global client cap
   (`WS_MAX_CLIENTS`) and heartbeat reaping.
 * **GraphQL query-cost ceilings** run as a validation rule *before any resolver*:
-  depth ≤ 15, aliased fields ≤ 50, directives ≤ 100 (`analyzeQuery`, unit-tested).
-  Alias breadth is the vector that matters — each alias can carry a 100-row list;
-  a bomb is rejected with `400` and zero store access.
+  depth ≤ 15, aliased fields ≤ 50, directives ≤ 100, and ≤ 10 000 list rows along
+  any single root-to-leaf path (`analyzeQuery` + `maxListRowsOnAnyPath`,
+  unit-tested). Alias breadth and nested list fan-out are the vectors that matter —
+  each alias or nesting level can carry a 100-row list; a bomb is rejected with
+  `400` and zero store access.
 * Every response carries baseline security headers (`X-Content-Type-Options:
   nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`); HTTP gets
   header/body timeouts (15 s / 60 s) against slowloris-style socket holds; JSON
@@ -225,7 +229,7 @@ explains the trade:
 | Advisory | Severity | Why it is acceptable here |
 | --- | --- | --- |
 | `GHSA-ggr8-5vv4-36mx` — `deepmerge-ts` via prisma CLI (`@prisma/config`) | high | CLI config-file merging over **our own** trusted config — never reachable from API input; fixed only by a major transitive bump that risks the migration tooling; the runtime query client does not use it |
-| `GHSA-848j-6mx2-7j84` (CVE-2025-14505) — `elliptic` / `secp256k1` via `@steempro/dsteem` | medium | **The engine runtime never signs** — transactions are signed client-side via Keychain, consensus authorities arrive pre-verified, runtime transport is first-party fetch (`src/chain/rpc.ts`), and the production engine image omits the chain entirely. The chain IS used on the ops path (`scripts/` multisig broadcasts and the watcher image, which signs via the pure-JS fallback) — accepted because a leak needs a faulty **and** a correct signature over one identical input (steem tx inputs carry ref-block + expiration), a single leaked active WIF stays below the 2-of-3 threshold, and no upstream fix exists for ≤ 6.6.1 |
+| `GHSA-848j-6mx2-7j84` (CVE-2025-14505) — `elliptic` / `secp256k1` via `@steempro/dsteem` | medium | **The engine runtime never signs** — transactions are signed client-side via Keychain, consensus authorities arrive pre-verified, runtime transport is first-party fetch (`src/chain/rpc.ts`), and the production engine image no longer ships `@steempro/dsteem` (the devDependency tree is pruned in the build stage). The chain IS used on the ops path (`scripts/` multisig broadcasts and the watcher image, which signs via the pure-JS fallback) — accepted because a leak needs a faulty **and** a correct signature over one identical input (steem tx inputs carry ref-block + expiration), a single leaked active WIF stays below the 2-of-3 threshold, and no upstream fix exists for ≤ 6.6.1 |
 | `GHSA-hp3w-g68c-fv3c` — jest coverage chain (`sprintf-js` via `js-yaml@3`) | moderate | test-time tooling only — the DoS shape needs attacker-controlled format strings, and format strings here are developer-written source; no shipped or reachable runtime code path |
 
 Local checks: `npm audit --omit=dev` (production-only view) and

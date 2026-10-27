@@ -1828,10 +1828,18 @@ export const CONTRACT_SOURCE = `
       candidates.push(candidate);
     }
     // Price-time priority: best price first, then the oldest order (id order).
+    // A SELL taker crosses the BID book, whose best price is the HIGHEST — mirror
+    // the sort by taker side so both sides always fill best-price-first. (An
+    // ascending-only comparator made SELL takers consume the worst qualifying bid
+    // first, handing the spread to wide-ladder owners while better bids waited.)
+    var descending = side === 'SELL';
     candidates.sort(function (a, b) {
       var pa = new BigNumber(a.price);
       var pb = new BigNumber(b.price);
-      if (!pa.eq(pb)) return pa.lt(pb) ? -1 : 1;
+      if (!pa.eq(pb)) {
+        if (descending) return pa.gt(pb) ? -1 : 1;
+        return pa.lt(pb) ? -1 : 1;
+      }
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
 

@@ -298,7 +298,12 @@ export class MemoryStore implements EngineStore {
     // In-process transactions are serialised in transaction(); nothing else to do here.
   }
 
-  async transaction<T>(fn: (tx: EngineStore) => Promise<T>): Promise<T> {
+  async transaction<T>(
+    fn: (tx: EngineStore) => Promise<T>,
+    _opts?: { isolationLevel?: 'repeatableRead'; timeoutMs?: number },
+  ): Promise<T> {
+    // _opts is informational only: serialising against this.lock already gives every
+    // callback (and the state-checksum digest) one consistent in-process snapshot.
     const run = async (): Promise<T> => {
       const snapshot = this.snapshot();
       try {

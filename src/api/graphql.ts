@@ -1,5 +1,5 @@
 import { ApolloServer, HeaderMap, type HTTPGraphQLRequest } from '@apollo/server';
-import { GraphQLError, GraphQLScalarType, Kind, type DocumentNode, type FragmentDefinitionNode, type SelectionNode, type ValidationContext, type ValueNode } from 'graphql';
+import { GraphQLError, GraphQLScalarType, Kind, getNamedType, isListType, isNonNullType, isObjectType, type DocumentNode, type FieldNode, type FragmentDefinitionNode, type GraphQLObjectType, type GraphQLSchema, type SelectionNode, type ValidationContext, type ValueNode } from 'graphql';
 import type { NextFunction, Request, Response } from 'express';
 
 import {
@@ -34,6 +34,15 @@ const DEFAULT_LIMIT = 20;
 export const MAX_QUERY_DEPTH = 15;
 export const MAX_QUERY_ALIASES = 50;
 export const MAX_QUERY_DIRECTIVES = 100;
+/**
+ * Maximum rows any single root-to-leaf path of an accepted query may request from
+ * the store. Shape ceilings (above) price structure; this prices the multiplicative
+ * work the structure converts into, so the Collection.instances <->
+* Instance.collection resolver cycle cannot turn one small anonymous query into
+ * f^7 rows of fan-out per listed collection (no execution deadline exists to bound
+ * it downstream, and the API shares its process and pool with the indexer).
+ */
+export const MAX_REQUEST_LIST_ROWS = 10_000;
 
 export interface QueryCost {
   /** Deepest field nesting reached (fragment spreads resolved, cycles guarded). */
@@ -87,6 +96,97 @@ export function analyzeQuery(document: DocumentNode): QueryCost {
   return { depth, aliases, directives };
 }
 
+/** Row factor of one paginated field selection (mirrors the resolvers' clampLimit). */
+function limitRows(selection: FieldNode): number {
+  const arg = selection.arguments?.find((a) => a.name.value === 'limit');
+  if (arg === undefined) return DEFAULT_LIMIT; // resolver default
+  if (arg.value.kind === Kind.INT) {
+    const n = Number.parseInt(arg.value.value, 10);
+    if (Number.isInteger(n) && n >= 1) return Math.min(n, MAX_LIMIT);
+  }
+  return MAX_LIMIT; // variable or nonsense literal: the resolver clamps to MAX_LIMIT
+}
+
+/**
+ * Product of row factors along the most expensive root-to-leaf path of an operation.
+ *
+ * A field is priced when its schema definition declares a `limit` argument — those
+ * are exactly the engine's paginated list fields (REST parity, hard-capped at
+ * MAX_LIMIT); its factor is the literal limit (clamped), the resolver default
+ * (DEFAULT_LIMIT) when omitted, or MAX_LIMIT when the value is a variable (worst
+ * case). Fields without `limit` (singletons, object hops, introspection lists) are
+ * schema-bounded and priced at 1. Pricing keys off the argument, so adding another
+ * paginated list field to the schema extends this budget automatically.
+ *
+ * The walk is TypeInfo-driven (schema-aware) with the same fragment cycle guard as
+ * analyzeQuery. Rejected queries fail validation with BAD_USER_INPUT before any
+ * resolver — and hence before any store read — runs.
+ */
+export function maxListRowsOnAnyPath(document: DocumentNode, schema: GraphQLSchema): number {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) fragments.set(definition.name.value, definition);
+  }
+
+  // Resolve types explicitly against the schema (a hand-rolled walk does not carry
+  // the enter/leave bookkeeping TypeInfo expects, so parent types are tracked here).
+  const objectAt = (typeName: string | undefined, fallback: GraphQLObjectType | null): GraphQLObjectType | null => {
+    if (!typeName) return fallback;
+    const type = schema.getType(typeName);
+    return type !== null && type !== undefined && isObjectType(type) ? type : fallback;
+  };
+
+  const walk = (
+    selections: readonly SelectionNode[],
+    parentType: GraphQLObjectType | null,
+    seen: ReadonlySet<string>,
+  ): number => {
+    let best = 1;
+    for (const selection of selections) {
+      if (selection.kind === Kind.FIELD) {
+        const fieldDef = parentType ? parentType.getFields()[selection.name.value] : undefined;
+        const fieldType = fieldDef?.type;
+        const nonNull =
+          fieldType !== undefined && fieldType !== null && isNonNullType(fieldType) ? fieldType.ofType : fieldType;
+        const isList = nonNull !== null && nonNull !== undefined && isListType(nonNull);
+        const paginated = (fieldDef?.args ?? []).some((a) => a.name === 'limit');
+        let path = isList && paginated ? limitRows(selection) : 1;
+        if (selection.selectionSet) {
+          const named = fieldType !== undefined && fieldType !== null ? getNamedType(fieldType) : null;
+          const childType = named !== null && isObjectType(named) ? named : null;
+          path *= Math.max(walk(selection.selectionSet.selections, childType, seen), 1);
+        }
+        if (path > best) best = path;
+      } else if (selection.kind === Kind.INLINE_FRAGMENT) {
+        const childType = objectAt(selection.typeCondition?.name.value, parentType);
+        best = Math.max(best, walk(selection.selectionSet.selections, childType, seen));
+      } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
+        if (seen.has(selection.name.value)) continue; // cycle guard
+        const fragment = fragments.get(selection.name.value);
+        if (!fragment) continue; // unresolved — validation rejects it anyway
+        const childType = objectAt(fragment.typeCondition.name.value, parentType);
+        const rows = walk(fragment.selectionSet.selections, childType, new Set(seen).add(selection.name.value));
+        if (rows > best) best = rows;
+      }
+    }
+    return best;
+  };
+
+  let rows = 1;
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.OPERATION_DEFINITION) {
+      const rootType =
+        definition.operation === 'mutation'
+          ? schema.getMutationType()
+          : definition.operation === 'subscription'
+            ? schema.getSubscriptionType()
+            : schema.getQueryType();
+      rows = Math.max(rows, walk(definition.selectionSet.selections, rootType ?? null, new Set()));
+    }
+  }
+  return rows;
+}
+
 /**
  * Validation rule enforcing {@link analyzeQuery}'s ceilings. Reporting through
  * `context.reportError` (instead of throwing mid-pipeline) makes graphql-js
@@ -100,14 +200,16 @@ export function queryCostRule(context: ValidationContext) {
       if (checked) return; // analyzeQuery measures the whole document at once
       checked = true;
       const cost = analyzeQuery(context.getDocument());
+      const rows = maxListRowsOnAnyPath(context.getDocument(), context.getSchema());
       if (
         cost.depth > MAX_QUERY_DEPTH ||
         cost.aliases > MAX_QUERY_ALIASES ||
-        cost.directives > MAX_QUERY_DIRECTIVES
+        cost.directives > MAX_QUERY_DIRECTIVES ||
+        rows > MAX_REQUEST_LIST_ROWS
       ) {
         context.reportError(
           new GraphQLError(
-            `query rejected: depth ${cost.depth}/${MAX_QUERY_DEPTH}, aliases ${cost.aliases}/${MAX_QUERY_ALIASES}, directives ${cost.directives}/${MAX_QUERY_DIRECTIVES}`,
+            `query rejected: depth ${cost.depth}/${MAX_QUERY_DEPTH}, aliases ${cost.aliases}/${MAX_QUERY_ALIASES}, directives ${cost.directives}/${MAX_QUERY_DIRECTIVES}, list-rows ${rows}/${MAX_REQUEST_LIST_ROWS}`,
             { extensions: { code: 'BAD_USER_INPUT' } },
           ),
         );
@@ -122,7 +224,7 @@ export interface GraphQLContext {
   storage: 'postgres' | 'memory';
 }
 
-const typeDefs = /* GraphQL */ `
+export const typeDefs = /* GraphQL */ `
   scalar JSON
 
   enum OrderStatus {

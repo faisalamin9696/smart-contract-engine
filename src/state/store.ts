@@ -114,6 +114,19 @@ export interface CountQuery {
  * `transaction()` gives block application atomicity: either the whole block (state
  * mutations + journal + logs + block cursor) commits, or nothing does.
  */
+export interface EngineTransactionOptions {
+  /**
+   * Pin every read in the callback — including the block cursor — to one committed
+   * snapshot. The state-checksum digest uses `repeatableRead` so its rows and its
+   * height label cannot disagree while the indexer keeps committing. Postgres applies
+   * the level; MemoryStore serialises transactions against its process lock, which
+   * already provides the same single-snapshot guarantee.
+   */
+  isolationLevel?: 'repeatableRead';
+  /** Per-transaction timeout; defaults to the store's block-application budget (60s). */
+  timeoutMs?: number;
+}
+
 export interface EngineStore {
   get(entity: EntityKind, key: string): Promise<JsonValue | null>;
   put(entity: EntityKind, key: string, value: JsonValue): Promise<void>;
@@ -148,7 +161,10 @@ export interface EngineStore {
   /** Serialises block processing across processes (Postgres advisory lock). */
   acquireIndexLock(): Promise<void>;
 
-  transaction<T>(fn: (tx: EngineStore) => Promise<T>): Promise<T>;
+  transaction<T>(
+    fn: (tx: EngineStore) => Promise<T>,
+    opts?: EngineTransactionOptions,
+  ): Promise<T>;
   close(): Promise<void>;
 }
 

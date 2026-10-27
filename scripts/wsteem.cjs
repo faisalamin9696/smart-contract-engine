@@ -939,7 +939,14 @@ async function scanPendingPegOuts() {
         'inventory spent without visible inbound; investigate manually',
     );
   }
-  const pegOuts = inbound.slice(burns.length).map((o) => ({ qty: qtyOf(o), sender: o.actor, height: o.height }));
+  const pegOuts = inbound.slice(burns.length).map((o) => ({
+    qty: qtyOf(o),
+    sender: o.actor,
+    height: o.height,
+    // Op-unique identity: every /api/v1/logs row carries id = height:txId:opIndex
+    // (the engine composes it precisely because a block's height is shared).
+    opKey: o.id || `${o.height}:${o.txId || ''}:${o.opIndex ?? 0}`,
+  }));
   const unconsumedSum = round3(pegOuts.reduce((a, p) => a + Number(p.qty), 0));
 
   if (held > 0 && pegOuts.length === 0) {
@@ -1037,7 +1044,11 @@ async function watchMode(args, keys) {
   const lagLimit = Number(process.env.WATCH_LAG_TICKS) || 20;
   const client = new Client(STEEM_RPC);
   const issuedIndices = new Set();
-  const consumedPegHeights = new Set();
+  // Peg-out dedup is keyed by the ENGINE LOG ID (height:txId:opIndex), not the
+  // block height: every op in a block shares the height, so a height-keyed set
+  // silently skipped the second same-block peg-out for the whole session — with
+  // no anomaly guard firing (funds stayed recoverable only via --pending/restart).
+  const consumedPegKeys = new Set();
   const flagged = new Set();
   let lagTicks = 0;
   console.log(
@@ -1123,13 +1134,13 @@ async function watchMode(args, keys) {
       process.exit(1);
     }
 
-    const pegNext = peg.pegOuts.find((p) => !consumedPegHeights.has(p.height));
+    const pegNext = peg.pegOuts.find((p) => !consumedPegKeys.has(p.opKey));
     if (pegNext) {
       console.log(
         `[${stamp}] peg-out ${pegNext.qty} ${SYMBOL} from ${pegNext.sender} (engine h${pegNext.height}) -> burn + release`,
       );
       await executePegOut(client, keys, pegNext.qty, pegNext.sender);
-      consumedPegHeights.add(pegNext.height);
+      consumedPegKeys.add(pegNext.opKey);
       continue; // one action per tick
     }
 

@@ -10,13 +10,15 @@
 # OSV-Scanner exits non-zero on any vulnerability NOT baselined here, so a new
 # advisory on any dependency fails the next CI run.
 
-# prisma -> @prisma/config -> deepmerge-ts (dev tooling). Absent from the runtime
-# image (Dockerfile: npm ci --omit=dev); the runtime @prisma/client does not use
-# it. Fixed only by a major transitive bump that risks breaking the prisma CLI
-# (migrations) for zero runtime gain.
+# prisma -> @prisma/config -> deepmerge-ts. The prisma CLI is a runtime
+# dependency (the entrypoint runs `npx prisma migrate deploy` on every boot), so
+# this chain ships in the image by necessity: the engine never passes attacker
+# input to it — config merging reads only our own trusted repository config, and
+# @prisma/client does not use it. Fixed only by a major transitive bump that
+# risks breaking the prisma CLI (migrations) for zero runtime gain.
 [[IgnoredVulns]]
 id = "GHSA-ggr8-5vv4-36mx"
-reason = "dev-only prisma tooling chain (prisma -> @prisma/config -> deepmerge-ts); absent from the runtime image; fix requires a major transitive bump - revisit with the next prisma upgrade"
+reason = "runtime-shipped by necessity: the entrypoint runs prisma migrate deploy on every boot; config merging reads only our own trusted repo config (never attacker input) and @prisma/client does not use this chain; fix requires a major transitive bump - revisit with the next prisma upgrade"
 
 # @steempro/dsteem -> secp256k1 -> elliptic. The advisory is an ECDSA *signing*
 # fault (CVE-2025-14505): faulty k-truncation can leak a key if an attacker holds

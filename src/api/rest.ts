@@ -15,6 +15,7 @@ import {
   type EngineStore,
 } from '../state/store';
 import { computeStateChecksum } from './checksum';
+import { createRateLimiter } from './rateLimit';
 import type { Logger } from '../logger';
 
 export interface RestDeps {
@@ -417,16 +418,24 @@ export function createRestRouter(deps: RestDeps): Router {
 
   // ---- cross-node verification ---------------------------------------------
 
+  // Dedicated, much lower budget than the generic 600 rpm per-IP limiter: one
+  // request fans out into full-table scans over six entities, so cap the route
+  // itself (single-flight coalescing + the digest's snapshot cache in checksum.ts
+  // collapse repeat polls, and this bound caps what one IP can restart per minute).
+  const stateChecksumLimiter = createRateLimiter({ rpm: 12, burst: 12 });
+
   /**
    * Deterministic fingerprint of the committed ledger (docs/NODE-OPERATOR.md):
    * operators running their own engine compare this against a reference node at the
    * same cursor height to prove their state matches the network — no trust required.
-   * Full-table digest, so treat it as a verification call, not a hot path.
+   * Full-table digest computed inside one repeatable-read snapshot (rows + cursor
+   * bound together), so treat it as a verification call, not a hot path.
    */
   router.get(
     '/state-checksum',
+    stateChecksumLimiter,
     wrap(async (_req, res) => {
-      res.json({ data: await computeStateChecksum(store, indexer, storage) });
+      res.json({ data: await computeStateChecksum(store, storage) });
     }),
   );
 

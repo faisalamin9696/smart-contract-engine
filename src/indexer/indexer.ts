@@ -134,7 +134,21 @@ export class Indexer {
       let outcome: StepOutcome;
       try {
         outcome = await this.step();
-        this.stats.consecutiveFailures = 0;
+        // A 'too-deep' reorg resolution (FAIL_ON_DEEP_FORK=false) resolved nothing:
+        // keep the failure streak alive so the loop's failure accounting stays true
+        // (/status shows it), while the drain gate below paces the retry instead of
+        // hot-looping the full ancestor walk at I/O rate with no signal at all.
+        const unresolvedTooDeep =
+          outcome.kind === 'reorg' && outcome.resolution.status === 'too-deep';
+        if (!unresolvedTooDeep) {
+          this.stats.consecutiveFailures = 0;
+        } else {
+          this.stats.consecutiveFailures += 1;
+          this.log.error('re-org deeper than the undo buffer (continuing, paced)', {
+            consecutive: this.stats.consecutiveFailures,
+            headHeight: outcome.headHeight,
+          });
+        }
       } catch (err) {
         const error = err as Error;
         if (error instanceof DeepForkError) {
@@ -163,9 +177,13 @@ export class Indexer {
         continue;
       }
 
+      // Only genuine catch-up work drains without the poll interval: applied blocks
+      // behind the head, and reorgs whose rollback must be re-applied. A 'too-deep'
+      // outcome changed no state, so it must NOT be treated as draining — otherwise
+      // every iteration repeats the identical walk with zero delay forever.
       const draining =
         (outcome.kind === 'applied' && outcome.headHeight > outcome.height) ||
-        outcome.kind === 'reorg';
+        (outcome.kind === 'reorg' && outcome.resolution.status !== 'too-deep');
       if (!draining) await sleep(this.opts.pollIntervalMs, signal);
     }
   }

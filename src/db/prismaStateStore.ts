@@ -633,6 +633,11 @@ export class PrismaStateStore implements EngineStore {
       // itself, is an exact numeric order. Ties break by account/symbol so
       // paging is deterministic.
       const conditions: Prisma.Sql[] = [];
+      // Account scope must survive the raw branch too: without this predicate the
+      // quantity order returned the unscoped global top-N — defeating the REST
+      // layer's own unscoped-dump refusal and disagreeing with countBalances
+      // (meta.total) and the MemoryStore/ORM branches, which all filter the account.
+      if (q.account) conditions.push(Prisma.sql`account = ${q.account}`);
       if (q.symbol) conditions.push(Prisma.sql`symbol = ${q.symbol}`);
       if (symbolOnly) conditions.push(Prisma.sql`quantity <> '0'`);
       const where =
@@ -803,7 +808,10 @@ export class PrismaStateStore implements EngineStore {
 
   /* -------------------------------------------------------------- transactions */
 
-  async transaction<T>(fn: (tx: EngineStore) => Promise<T>): Promise<T> {
+  async transaction<T>(
+    fn: (tx: EngineStore) => Promise<T>,
+    opts?: { isolationLevel?: 'repeatableRead'; timeoutMs?: number },
+  ): Promise<T> {
     if (!this.root) {
       // Already inside an interactive transaction (nested call): run in place, so the
       // nested work joins the outer atomic unit instead of opening a second one.
@@ -813,7 +821,15 @@ export class PrismaStateStore implements EngineStore {
       async (client) => fn(this.inside(client)),
       // Block application (parse -> sandbox -> guards -> writes) is far below this bound;
       // a hung statement then fails fast and rolls back instead of holding the lock.
-      { timeout: 60_000, maxWait: 10_000 },
+      // The state-checksum digest widens the timeout and pins a repeatable-read snapshot
+      // so its rows and height label come from one committed view of the ledger.
+      {
+        timeout: opts?.timeoutMs ?? 60_000,
+        maxWait: 10_000,
+        ...(opts?.isolationLevel === 'repeatableRead'
+          ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+          : {}),
+      },
     );
   }
 

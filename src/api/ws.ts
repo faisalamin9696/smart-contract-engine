@@ -19,6 +19,16 @@ export interface WsHubOptions {
 
 const ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 const SYMBOL_RE = /^[A-Z][A-Z0-9]{2,11}$/;
+/**
+ * Slow-consumer policy: ws queues unsent bytes in process memory with no cap of
+ * its own. A subscriber whose unflushed send queue outgrows this limit for
+ * WS_SEND_BUFFER_MAX_OVERFLOWS consecutive fan-outs is terminated — a client that
+ * keeps answering pings while draining slower than event production would
+ * otherwise grow the shared engine heap without bound (duplicated across up to
+ * WS_MAX_CLIENTS sockets).
+ */
+const WS_SEND_BUFFER_LIMIT = 1_048_576; // 1 MiB of unflushed bytes per socket
+const WS_SEND_BUFFER_MAX_OVERFLOWS = 3; // consecutive over-cap fan-outs before close
 
 /**
  * Validates a channel name.
@@ -58,6 +68,8 @@ type ClientMessage =
 export class WebSocketHub {
   private readonly wss: WebSocketServer;
   private readonly subscriptions = new Map<WebSocket, Set<EventChannel>>();
+  /** Per-socket consecutive send-queue overflow strikes (see WS_SEND_BUFFER_LIMIT). */
+  private readonly sendOverflow = new WeakMap<WebSocket, number>();
   private readonly maxPayload: number;
   private readonly heartbeatMs: number;
   private readonly maxSubs: number;
@@ -236,6 +248,28 @@ export class WebSocketHub {
         subs.has('*') || eventChannels.some((channel) => subs.has(channel));
       if (!matched) continue;
       if (socket.readyState === WebSocket.OPEN) socket.send(payload);
+      // Slow-consumer policy: ws queues unsent bytes in process memory with no
+      // bound of its own. A client that keeps answering pings while draining
+      // slower than event production would grow the shared engine heap without
+      // limit (and is duplicated across up to WS_MAX_CLIENTS sockets), so strike
+      // sockets whose unflushed send queue outgrows the cap and terminate after
+      // the configured number of consecutive overflows. A drain that falls back
+      // under the cap resets the strikes, so healthy subscribers are never hit.
+      if (socket.bufferedAmount > WS_SEND_BUFFER_LIMIT) {
+        const overflows = (this.sendOverflow.get(socket) ?? 0) + 1;
+        if (overflows >= WS_SEND_BUFFER_MAX_OVERFLOWS) {
+          this.log.warn('ws terminating slow consumer', {
+            bufferedAmount: socket.bufferedAmount,
+            overflows,
+          });
+          this.sendOverflow.delete(socket);
+          socket.terminate();
+        } else {
+          this.sendOverflow.set(socket, overflows);
+        }
+      } else if (this.sendOverflow.delete(socket)) {
+        // Drained back under the cap — reset the strike counter.
+      }
     }
   }
 

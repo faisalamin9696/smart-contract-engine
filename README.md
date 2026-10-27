@@ -381,7 +381,7 @@ right (see above).
 | `FAIL_ON_DEEP_FORK` | `true` | halt vs. warn on forks beyond the buffer |
 | `QUORUM_VERIFY_DEPTH` | `50` | head-window (in blocks) cross-checked against a second RPC endpoint before a block is applied; 0 = off, deep sync exempt, single endpoint ignored (see [docs/SECURITY.md](docs/SECURITY.md)) |
 | `RATE_LIMIT_RPM` | `600` | per-IP HTTP budget for REST + GraphQL (token bucket; `/health` exempt; 0 = off) |
-| `TRUST_PROXY_HOPS` | `1` | reverse-proxy hops for X-Forwarded-For (spoof-proof fixed hop count) |
+| `TRUST_PROXY_HOPS` | `1` | reverse-proxy hops for X-Forwarded-For (spoof-proof behind exactly one appending proxy; use `0` with direct exposure) |
 | `WS_MAX_CLIENTS` | `500` | hard cap on simultaneous WebSocket connections (0 = unlimited) |
 | `LOG_LEVEL` | `info` | `debug \| info \| warn \| error` |
 

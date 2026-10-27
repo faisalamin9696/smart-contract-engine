@@ -33,7 +33,7 @@ COPY scripts/wsteem.cjs ./scripts/wsteem.cjs
 # redeploy and ships to anyone who pulls the image.
 ENV BRIDGE_ACCOUNT=steempro.funds \
     SCE_OP_ID=sce-mainnet1 \
-    ENGINE_API=https://sce-api.steem.com \
+    ENGINE_API=https://sce-api.steempro.com \
     STEEM_RPC=https://api.steemit.com \
     WATCH_INTERVAL=30 \
     WATCH_LAG_TICKS=20

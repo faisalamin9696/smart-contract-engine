@@ -5,9 +5,8 @@ import { PrismaClient } from '@prisma/client';
 
 import { computeStateChecksum } from '../../src/api/checksum';
 import { PrismaStateStore } from '../../src/db/prismaStateStore';
-import type { Indexer } from '../../src/indexer/indexer';
-import { MemoryStore } from '../../src/state/memoryStore';
 import type { EngineStore } from '../../src/state/store';
+import { MemoryStore } from '../../src/state/memoryStore';
 import type {
   BlockRecord,
   BookOrder,
@@ -344,10 +343,29 @@ describeDb('PrismaStateStore (Postgres parity)', () => {
     };
     await fixture(store);
     await fixture(reference);
+    // The digest's height label is read from the block cursor inside its own
+    // repeatable-read snapshot (both stores get the fixture cursor row).
+    await store.putBlock({
+      height: H1,
+      blockId: 'fixture',
+      previous: '',
+      timestamp: '2026-01-01T00:00:00',
+      txCount: 0,
+      opCount: 0,
+      appliedAt: '2026-01-01T00:00:00',
+    });
+    await reference.putBlock({
+      height: H1,
+      blockId: 'fixture',
+      previous: '',
+      timestamp: '2026-01-01T00:00:00',
+      txCount: 0,
+      opCount: 0,
+      appliedAt: '2026-01-01T00:00:00',
+    });
 
-    const indexer = { cursor: async () => ({ height: H1, blockId: 'fixture' }) } as unknown as Indexer;
-    const fromPostgres = await computeStateChecksum(store, indexer, 'postgres');
-    const fromMemory = await computeStateChecksum(reference, indexer, 'memory');
+    const fromPostgres = await computeStateChecksum(store, 'postgres');
+    const fromMemory = await computeStateChecksum(reference, 'memory');
 
     expect(fromMemory.height).toBe(H1);
     expect(fromPostgres.height).toBe(fromMemory.height);
