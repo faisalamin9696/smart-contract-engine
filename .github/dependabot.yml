@@ -13,6 +13,31 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Majors of consensus/runtime/toolchain-critical packages are deliberate,
+    # reviewed migrations (bignumber.js = consensus math; prisma pair = the
+    # boot-critical migrate path; typescript = peer-locked to ts-jest;
+    # express/graphql/ws/zod/isolated-vm = engine runtime). These ignores apply
+    # to VERSION updates only — Dependabot *security* updates are a separate
+    # mechanism and still open (that is how the zod GHSA-mrhx major PR arrived).
+    ignore:
+      - dependency-name: "bignumber.js"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "prisma"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@prisma/client"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "express"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "graphql"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "ws"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "zod"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "isolated-vm"
+        update-types: ["version-update:semver-major"]
 
   # The watcher ships its own lockfile (the production signer tree behind
   # docker-compose.watcher.yml) — without this entry Dependabot would never
