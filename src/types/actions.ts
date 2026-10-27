@@ -152,7 +152,7 @@ const MAX_SAFE_INT = 9007199254740991;
 const MAX_BATCH_TOKENS = 50;
 const MAX_ISSUE_INSTANCES = 10;
 
-const FreeForm = z.record(z.any()).superRefine((value, ctx) => {
+const FreeForm = z.record(z.string(), z.any()).superRefine((value, ctx) => {
   const walk = (v: unknown, path: string): void => {
     if (typeof v === 'number' && !Number.isInteger(v)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `floating point at ${path} is forbidden` });
@@ -173,7 +173,7 @@ const FreeForm = z.record(z.any()).superRefine((value, ctx) => {
  * accepts integer strings, e.g. `"2"`, exactly as the wiki shows).
  */
 const PropertyValue = z.union([z.boolean(), z.string().max(100), z.number().int()]);
-const PropertyValueMap = z.record(PropertyValue);
+const PropertyValueMap = z.record(z.string(), PropertyValue);
 
 /** A batch of token ids grouped by symbol, exactly like the wiki's `nfts` parameter. */
 const NftGroups = z

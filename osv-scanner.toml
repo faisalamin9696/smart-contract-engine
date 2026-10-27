@@ -10,16 +10,6 @@
 # OSV-Scanner exits non-zero on any vulnerability NOT baselined here, so a new
 # advisory on any dependency fails the next CI run.
 
-# prisma -> @prisma/config -> deepmerge-ts. The prisma CLI is a runtime
-# dependency (the entrypoint runs `npx prisma migrate deploy` on every boot), so
-# this chain ships in the image by necessity: the engine never passes attacker
-# input to it — config merging reads only our own trusted repository config, and
-# @prisma/client does not use it. Fixed only by a major transitive bump that
-# risks breaking the prisma CLI (migrations) for zero runtime gain.
-[[IgnoredVulns]]
-id = "GHSA-ggr8-5vv4-36mx"
-reason = "runtime-shipped by necessity: the entrypoint runs prisma migrate deploy on every boot; config merging reads only our own trusted repo config (never attacker input) and @prisma/client does not use this chain; fix requires a major transitive bump - revisit with the next prisma upgrade"
-
 # @steempro/dsteem -> secp256k1 -> elliptic. The advisory is an ECDSA *signing*
 # fault (CVE-2025-14505): faulty k-truncation can leak a key if an attacker holds
 # both a faulty and a correct signature for the same input. No upstream fix exists
@@ -48,20 +38,3 @@ reason = "accepted on the production ops signing path (scripts/ + watcher image 
 # never attacker-controlled input. No fix available (affects <= 1.1.3).
 # [Removed 2026-10-26: OSV reports this ignore unused — the js-yaml@3 chain no
 # longer matches the lockfile. Re-add if the advisory starts matching again.]
-
-# zod (types/actions.ts parseEnvelope -> PARAM_SCHEMAS.safeParse): the advisory
-# is a memory-exhaustion DoS — $ZodArray accumulates one issue object per failing
-# element with no cap, so a *huge* invalid array can OOM the process. Fixed only
-# in zod 4.6.6 (v4 major; the engine is on 3.25.76, migration tracked as open
-# Dependabot PR #4). Accepted for now because every path to zod is byte-bounded
-# before the parse: op payloads pass MAX_PAYLOAD_BYTES (16 KiB, actions.ts) in
-# opParser BEFORE parseEnvelope, so the worst-case array an attacker can submit
-# is a few thousand elements -> a few MB of issue objects, not an OOM. The REST
-# and GraphQL surfaces do not run zod on request input (manual strParam/page
-# parsing; graphql-js validates queries). Impact is availability-only (CVSS
-# A:H; no confidentiality or integrity component). Re-open when: PR #4 (zod 4)
-# is merged, MAX_PAYLOAD_BYTES is raised, or an exploit demo shows the byte cap
-# no longer bounds the allocation.
-[[IgnoredVulns]]
-id = "GHSA-mrhx-c7xc-m3w5"
-reason = "DoS-only (no C/I impact); zod runs only behind MAX_PAYLOAD_BYTES=16KiB pre-parse cap on the op path, REST/GraphQL never feed request input to zod, so arrays are byte-bounded and cannot reach OOM scale; fix is a v4 major tracked as open PR #4 - revisit when PR #4 merges or the byte cap changes"

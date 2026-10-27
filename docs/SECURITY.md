@@ -228,9 +228,10 @@ explains the trade:
 
 | Advisory | Severity | Why it is acceptable here |
 | --- | --- | --- |
-| `GHSA-ggr8-5vv4-36mx` — `deepmerge-ts` via prisma CLI (`@prisma/config`) | high | CLI config-file merging over **our own** trusted config — never reachable from API input; fixed only by a major transitive bump that risks the migration tooling; the runtime query client does not use it |
+| `GHSA-ggr8-5vv4-36mx` — `deepmerge-ts` via prisma CLI (`@prisma/config`) | fixed | root `package.json` now pins `deepmerge-ts` to `^8.0.2` through `overrides` (v8 keeps the `deepmerge` export `@prisma/config` consumes — `prisma validate`, `prisma migrate diff`, typecheck, build and the full 285-test suite re-verified locally), clearing this advisory and both dependent-chain alerts |
+| `GHSA-mrhx-c7xc-m3w5` — `zod` oversized-collection DoS | fixed | zod upgraded `3.25.76` → `4.6.7` (schema files re-verified: typecheck, full 285-test suite, build all green); the op path was also bounded by `MAX_PAYLOAD_BYTES` pre-parse anyway |
 | `GHSA-848j-6mx2-7j84` (CVE-2025-14505) — `elliptic` / `secp256k1` via `@steempro/dsteem` | medium | **The engine runtime never signs** — transactions are signed client-side via Keychain, consensus authorities arrive pre-verified, runtime transport is first-party fetch (`src/chain/rpc.ts`), and the production engine image no longer ships `@steempro/dsteem` (the devDependency tree is pruned in the build stage). The chain IS used on the ops path (`scripts/` multisig broadcasts and the watcher image, which signs via the pure-JS fallback) — accepted because a leak needs a faulty **and** a correct signature over one identical input (steem tx inputs carry ref-block + expiration), a single leaked active WIF stays below the 2-of-3 threshold, and no upstream fix exists for ≤ 6.6.1 |
-| `GHSA-hp3w-g68c-fv3c` — jest coverage chain (`sprintf-js` via `js-yaml@3`) | moderate | test-time tooling only — the DoS shape needs attacker-controlled format strings, and format strings here are developer-written source; no shipped or reachable runtime code path |
+| `GHSA-hp3w-g68c-fv3c` — jest coverage chain (`sprintf-js` via `js-yaml@3`) | no longer matching | the `js-yaml@3` chain left the lockfile (OSV baseline entry removed 2026-10-26 as unused); row retained for history — the test-time DoS shape was never reachable runtime code |
 
 Local checks: `npm audit --omit=dev` (production-only view) and
 `osv-scanner scan --lockfile package-lock.json` (+ `--lockfile

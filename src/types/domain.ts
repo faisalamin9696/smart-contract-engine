@@ -462,7 +462,7 @@ export function assertNoFloats(value: unknown, path = '$'): void {
 }
 
 export const jsonMapSchema = z
-  .record(z.any())
+  .record(z.string(), z.any())
   .refine((v) => v !== undefined, { message: 'must be an object' })
   .superRefine((v, ctx) => {
     try {
