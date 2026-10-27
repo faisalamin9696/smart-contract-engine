@@ -63,6 +63,11 @@ DB_NETWORK=<network> docker compose -f docker-compose.yml -f docker-compose.dbne
 docker compose -f docker-compose.yml -f docker-compose.local-db.yml up -d --build
 ```
 
+`docker-compose.local-db.yml` publishes PostgreSQL on **loopback only**
+(`127.0.0.1:5432` by default): engine traffic keeps using the compose network, so
+nothing changes for it — only host-side `psql` is affected. Set `LOCAL_PG_BIND`
+deliberately if you really need remote access, or use `docker exec` instead.
+
 Startup: the engine's entrypoint runs `npx prisma migrate deploy` (applies
 `prisma/migrations`, idempotent via Prisma's advisory lock) and only then starts the
 process, retrying for ~2.5 minutes while the database boots. There is deliberately **no

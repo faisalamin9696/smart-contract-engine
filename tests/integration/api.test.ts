@@ -280,17 +280,24 @@ describe('HTTP (REST + GraphQL) and WebSocket API', () => {
     // degraded (503) so the shipped healthcheck and orchestrators can act — the
     // old always-200 probe could never report a halted engine or a failed store.
     expect(health.status).toBe(503);
-    expect(await health.json()).toMatchObject({
+    const healthBody = (await health.json()) as { version: string };
+    expect(healthBody).toMatchObject({
       status: 'degraded',
       storage: 'memory',
       indexer: { running: false, cursorHeight: 5, storeError: false, opId: 'sce-mainnet1' },
     });
+    // Build identity: version always present; buildSha stays null unless the
+    // build passed SCE_BUILD_SHA (no exact-value assertions on purpose).
+    expect(typeof healthBody.version).toBe('string');
+    expect(healthBody.version.length).toBeGreaterThan(0);
 
     const status = await fetch(`${base}/api/v1/status`);
     expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({
+    const statusBody = (await status.json()) as { data: { version: string } };
+    expect(statusBody).toMatchObject({
       data: { cursorHeight: 5, storage: 'memory', headHeight: 5, opId: 'sce-mainnet1' },
     });
+    expect(typeof statusBody.data.version).toBe('string');
   });
 
   it('answers REST reads over indexed projections', async () => {

@@ -13,6 +13,7 @@ import { createGraphQL, type GraphQLHandle } from './graphql';
 import { createRateLimiter } from './rateLimit';
 import { createRestRouter, restErrorHandler } from './rest';
 import { WebSocketHub } from './ws';
+import { appVersion, buildSha } from '../version';
 
 export interface ApiDeps {
   config: Config;
@@ -113,6 +114,8 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
     const ok = status.running && !storeError;
     res.status(ok ? 200 : 503).json({
       status: ok ? 'ok' : 'degraded',
+      version: appVersion,
+      buildSha,
       uptimeSeconds: Math.round(process.uptime()),
       storage: deps.storage,
       indexer: {
@@ -129,6 +132,8 @@ export async function startApi(deps: ApiDeps): Promise<ApiServer> {
   app.get('/', (_req: Request, res: Response) => {
     res.json({
       name: 'sce-engine',
+      version: appVersion,
+      buildSha,
       api: {
         health: 'GET /health',
         rest: config.restEnabled

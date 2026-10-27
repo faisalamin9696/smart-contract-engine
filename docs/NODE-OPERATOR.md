@@ -21,8 +21,10 @@ endpoints and a database.
 
 ## 1. Prerequisites
 
-* Node.js ≥ 20 and npm (or Docker — all compose variants are provided)
-* PostgreSQL 16 (or use `docker-compose.local-db.yml`, which bundles one)
+* Node.js ≥ 24 and npm (or Docker — all compose variants are provided). The
+  `engines` field enforces ≥24 (isolated-vm 7's floor), so npm refuses older runtimes
+* PostgreSQL 16 (or use `docker-compose.local-db.yml`, which bundles one — it
+  publishes PostgreSQL on loopback only, see DEPLOYMENT.md)
 * Outbound HTTPS to your Steem RPC endpoints; inbound only if you want to serve the API
 
 ## 2. Install
@@ -61,6 +63,22 @@ Docker users: see the compose variants in the README (the image entrypoint runs
 | `SANDBOX_PROVIDER` | `auto` | pin `isolated-vm` in production to guarantee the hardened isolate. |
 
 Full list: README → Configuration; every knob is also in `.env.example`.
+
+### Minimal verification-node profile (a witness node)
+
+A node that exists only to independently verify the ledger needs no keys and can
+run lean:
+
+* engine + PostgreSQL only — skip `docker-compose.watcher.yml` entirely: the
+  watcher holds bridge WIFs and a verification node never needs them;
+* keep `REST_ENABLED=true` — it also serves `/health` and `/api/v1/status`,
+  which the compose healthcheck and §6 depend on; set `GRAPHQL_ENABLED=false`
+  if you do not use GraphQL;
+* the WebSocket server always listens on `WS_PORT` and cannot be disabled by
+  configuration — firewall the port if you serve no subscribers;
+* run without a reverse proxy: `TRUST_PROXY_HOPS=0` (see [SECURITY.md](SECURITY.md));
+* point `STEEM_RPC_ENDPOINTS` at your own Steem node plus a public fallback and
+  you depend on nothing of ours except the chain itself.
 
 ## 4. Sync semantics (read this before your first boot)
 
@@ -157,7 +175,9 @@ curl https://your-host/api/v1/state-checksum
 
 Procedure:
 
-1. Pick a reference node (e.g. the public endpoint, or another operator).
+1. Pick a reference node. The canonical one is the public mainnet API,
+   `https://sce-api.steempro.com`; once a second independent operator exists,
+   cross-check against them too (two independent references beat one).
 2. If heights differ, wait for both cursors to reach the same height (re-run).
 3. Compare `checksum`. On mismatch, compare `entities` to see which table diverged,
    then diff that table via the REST/GraphQL reads.
@@ -169,6 +189,14 @@ Near the head, blocks are additionally **quorum-verified** across your endpoints
 (see SECURITY.md → "RPC trust"), so a single lying RPC cannot silently diverge your
 view while you watch.
 
+The endpoint is budgeted at **12 requests per minute per IP** (repeat polls at
+the same height are answered from an in-process cache), so a verification cron
+should poll at most a few times a minute from one address — HTTP `429` means you
+hit the shared budget, not that verification failed. Digests are computed inside
+a single consistent snapshot (cursor + rows from one committed view), so they
+stay meaningful while the reference node is actively indexing; the equal-height
+rule above remains the only thing that makes two digests comparable.
+
 ## 7. Monitoring & capacity
 
 No agent needed — the engine answers its own health over HTTP. **Alert on these**
@@ -177,6 +205,7 @@ No agent needed — the engine answers its own health over HTTP. **Alert on thes
 | Signal | Where | Alert when |
 | --- | --- | --- |
 | cursor lag | `GET /health` | `headHeight - cursorHeight > 100` for several minutes (stuck ingestion) |
+| engine health | `GET /health` | HTTP `503` / `"status":"degraded"` — halted indexer or unreachable database (fields: `indexer.running`, `indexer.storeError`) |
 | ingest progress | `GET /api/v1/status` | `blocksApplied` flat while the cursor lags |
 | quorum disagreements | logs (`QUORUM_DISAGREE`) | any sustained occurrence — a lying or failing endpoint |
 | sandbox degradation | `GET /health` → `sandbox` | anything but `isolated-vm` in production |
@@ -213,6 +242,9 @@ replicated database can absorb traffic. The write path (ingestion) is
 git pull
 docker compose up -d --build     # entrypoint: prisma migrate deploy, then start
 curl localhost:4000/health       # confirm cursor resumes at head
+curl localhost:4000/health | jq .version   # confirm the new build (release = bump
+                                           # package.json version; SCE_BUILD_SHA
+                                           # stamps the exact commit if set)
 ```
 
 Migrations are additive and run automatically; no manual DDL. If a migration is a
@@ -271,3 +303,5 @@ License: MIT (see `LICENSE`).
 | disk filling up | block/op history grows monotonically — watch the trend, keep WAL on the same disk sizing as data, use §5 snapshots for distribution |
 | `sorry, too many clients already` | Postgres connection slots exhausted — lower `connection_limit` in `DATABASE_URL` or raise `max_connections` |
 | upstream HTTP 429 from RPC endpoints | you are polling faster than public endpoints allow — endpoints cool down and rotate automatically; add your own node or raise `BLOCK_POLL_INTERVAL_MS` |
+| `Unique constraint failed on (height, seq)` in logs | two engine instances write one database (§7: single-writer) — stop the extra one; a single occurrence right after a rolling deploy is the known two-writer race, the loser backs off and converges |
+| `/health` returns 503 / `degraded` | `indexer.running=false` (halted, e.g. deep fork) or `indexer.storeError=true` (DB unreachable) — check logs; the compose healthcheck acts on this status code |

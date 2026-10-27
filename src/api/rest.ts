@@ -14,6 +14,7 @@ import {
   tokenIcon,
   type EngineStore,
 } from '../state/store';
+import { appVersion, buildSha } from '../version';
 import { computeStateChecksum } from './checksum';
 import { createRateLimiter } from './rateLimit';
 import type { Logger } from '../logger';
@@ -127,6 +128,8 @@ export function createRestRouter(deps: RestDeps): Router {
           undoDepth: status.buffer.undoDepth,
           redoSize: status.buffer.redoSize,
           stats: status.stats,
+          version: appVersion,
+          buildSha,
         },
       });
     }),
