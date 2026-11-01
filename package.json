@@ -41,7 +41,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jest": "^30.0.0",
-    "@types/node": "^24.19.2",
+    "@types/node": "^26.6.6",
     "@types/ws": "^8.5.13",
     "jest": "^30.5.2",
     "ts-jest": "^29.4.14",
