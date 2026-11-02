@@ -1,0 +1,51 @@
+# Known-vulnerability baseline for OSV-Scanner (CI scans every lockfile — root
+# package-lock.json and watcher/package-lock.json — on each push with a pinned,
+# checksum-verified binary; see ci.yml "Supply-chain scan" and docs/SECURITY.md
+# -> "Supply-chain scanning").
+#
+# Rules for entries below:
+#   * every ignore MUST carry a written reason,
+#   * dev-only status MUST be verified (`npm ls <pkg>`), not assumed,
+#   * each entry names the trigger that re-opens the question.
+# OSV-Scanner exits non-zero on any vulnerability NOT baselined here, so a new
+# advisory on any dependency fails the next CI run.
+
+# @steempro/dsteem -> secp256k1 -> elliptic. The advisory is an ECDSA *signing*
+# fault (CVE-2025-14505): faulty k-truncation can leak a key if an attacker holds
+# both a faulty and a correct signature for the same input. No upstream fix exists
+# (all elliptic versions <= 6.6.1 are affected).
+#
+# Status is NO LONGER dev-only: scripts/ (multisig issue/burn/withdraw/transfer)
+# and the watcher image (docker-compose.watcher.yml - pure-JS secp256k1 under
+# npm --ignore-scripts) sign continuously on the mainnet ops path. The engine
+# runtime itself still never signs (Keychain/client-side; first-party transport).
+# Accepted because:
+#   * a leak needs BOTH a faulty and a correct signature over one identical
+#     input - steem tx inputs carry ref-block + expiration, so identical inputs
+#     recur only on a deliberate retry of the same tx,
+#   * blast radius is bounded by the 2-of-3 active threshold: one leaked WIF
+#     cannot act alone, and the third WIF never touches a signing host,
+#   * no fix exists to take (secp256k1 3.8.1 / elliptic 6.6.1 are current).
+# Re-open when: elliptic ships a fixed release, the advisory's severity is
+# upgraded, or dsteem replaces this signing chain.
+[[IgnoredVulns]]
+id = "GHSA-848j-6mx2-7j84"
+reason = "accepted on the production ops signing path (scripts/ + watcher image via dsteem -> secp256k1 -> elliptic): leak requires a faulty+correct signature pair over one identical input, a single leaked active WIF stays below the 2-of-3 threshold, no upstream fix exists for <= 6.6.1 - revisit when elliptic ships one or the advisory is upgraded"
+
+# ts-jest -> babel-plugin-istanbul -> js-yaml@3 -> argparse -> sprintf-js (test
+# tooling). The advisory is a DoS via unbounded precision specifiers in format
+# strings; in the test toolchain format strings are developer-written source,
+# never attacker-controlled input. No fix available (affects <= 1.1.3).
+# [Removed 2026-10-26: OSV reports this ignore unused — the js-yaml@3 chain no
+# longer matches the lockfile. Re-add if the advisory starts matching again.]
+
+# jest -> jest-config -> deepmerge@4.3.1 (test tooling; sole parent verified via
+# `npm ls deepmerge`). The advisory hits jest's config-normalisation merge; this
+# repo's jest config is developer-authored source (jest.config.cjs), never
+# attacker-controlled input. Not shipped: the runtime image runs
+# `npm prune --omit=dev` before copying node_modules (Dockerfile). No fix exists
+# (deepmerge 4.3.1 is the latest release; GHSA lists no patched version).
+# Re-open when: deepmerge ships a fixed release or jest drops the dependency.
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+reason = "dev-only test tooling (jest -> jest-config), jest config is developer-authored source not attacker input, pruned from the runtime image (Dockerfile npm prune --omit=dev), no upstream fix exists (deepmerge 4.3.1 is latest) - revisit when a fixed deepmerge ships or jest drops it"

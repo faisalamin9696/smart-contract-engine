@@ -1,0 +1,54 @@
+# ── WSTEEM bridge watcher deployment ───────────────────────────────────────────
+# Use this file as the Compose service's "Compose Path" in Dokploy.
+#
+#   1. Project → + Service → Compose → type "Docker Compose" → pick your git repo
+#   2. Compose Path:  docker-compose.watcher.yml
+#   3. Environment tab:  STEEM_ACTIVE_WIF=<the two bridge WIFs, space-separated>
+#      (the third/backup WIF is never uploaded — docs/BRIDGE.md → "Server deployment")
+#   4. Deploy   (no Domains tab: the service is outbound-only, nothing listens)
+#
+# THREAT MODEL: this is the ONLY bridge signer — the 2-of-3 threshold lives in its
+# environment, so treat this project's Environment tab like a signing key. The
+# engine service stays keyless; never merge the two.
+#
+# STOP SEMANTICS: scripts/wsteem.cjs exits non-zero the moment it doubts itself
+# (supply shortfall, sum > excess, state/logs disagreement, lag timeout …) and
+# that exit is DELIBERATE. Both restart switches below keep it dead:
+#   * restart: "no"                    — plain docker compose
+#   * deploy.restart_policy: none      — Dokploy deploys compose as a Swarm stack,
+#                                        which IGNORES the top-level restart: and
+#                                        otherwise defaults to restarting forever.
+# A stopped watcher = an alert: read its logs in Dokploy, investigate, then
+# restart. Never replace these with an unconditional restart policy — restarting
+# into a suspected double-release is exactly the failure the stop exists to prevent.
+
+services:
+  watcher:
+    build:
+      context: .
+      dockerfile: watcher/Dockerfile
+    environment:
+      # Refuse to deploy without the key: a watcher that starts then dies in the
+      # dark is worse than one that never starts. Two active WIFs satisfy the
+      # account's 2-of-3 threshold (one space-separated value).
+      STEEM_ACTIVE_WIF: ${STEEM_ACTIVE_WIF:?set STEEM_ACTIVE_WIF in the Dokploy Environment tab (two bridge WIFs, space-separated)}
+      # Non-secret defaults are baked in the Dockerfile; mirrored here so the full
+      # runtime configuration is visible (and overridable) at deploy time.
+      BRIDGE_ACCOUNT: ${BRIDGE_ACCOUNT:-steempro.funds}
+      SCE_OP_ID: ${SCE_OP_ID:-sce-mainnet1}
+      ENGINE_API: ${ENGINE_API:-https://sce-api.steempro.com}
+      STEEM_RPC: ${STEEM_RPC:-https://api.steemit.com}
+      WATCH_INTERVAL: ${WATCH_INTERVAL:-30}
+      WATCH_LAG_TICKS: ${WATCH_LAG_TICKS:-20}
+    # One instance, always — a second watcher would race the same pairing (the
+    # script's PID lock enforces the same rule inside a host, too).
+    restart: "no"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

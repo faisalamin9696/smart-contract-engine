@@ -1,0 +1,116 @@
+# CI for the SCE engine — the local pre-push gates, plus the two checks that
+# cannot run on the Windows dev box:
+#
+#   * `sh -n docker-entrypoint.sh`        (entrypoint syntax — runners have sh)
+#   * the Postgres parity suite           (`tests/integration/postgresStore.test.ts`
+#      is skipped without TEST_DATABASE_URL; the service container below provides
+#      a throwaway database — the suite applies migrations itself and cleans up
+#      its TST* fixtures afterwards)
+#
+# Everything else mirrors the documented routine (docs/TOKENS-DESIGN.md):
+# tsc --noEmit, jest --runInBand (deterministic single-worker), build, js-yaml.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: typecheck · test · build · deploy artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sce
+          POSTGRES_PASSWORD: sce
+          POSTGRES_DB: sce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sce -d sce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # prisma validate resolves env("DATABASE_URL") in the datasource (locally
+      # provided by .env); point it at the throwaway DB — validate never connects.
+      DATABASE_URL: postgresql://sce:sce@localhost:5432/sce_test
+      TEST_DATABASE_URL: postgresql://sce:sce@localhost:5432/sce_test
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # isolated-vm ships prebuilt binaries, but an npm ci that lost the addon (an
+      # omit flag, a failed prebuild resolution) would otherwise be silent and the
+      # suite would then test only the node-vm fallback. Prove the hardened isolate
+      # is actually present (docs/SECURITY.md → "Sandbox provider contract").
+      - name: Verify isolated-vm addon built
+        run: node -e "require('isolated-vm')"
+
+      # Independent supply-chain scan against Google's OSV.dev database, which
+      # aggregates GHSA + npm feeds — cross-checking what `npm audit` alone can
+      # lag on (the Aug-2026 isolated-vm advisory existed as a GHSA before npm
+      # reported it). Version-pinned and SLSA3-published; the checksum from the
+      # release SHA256SUMS is verified before use. Known advisories are
+      # baselined with reasons in ./osv-scanner.toml — anything new fails here,
+      # before the slower test steps (docs/SECURITY.md -> "Supply-chain scanning").
+      - name: Supply-chain scan (OSV-Scanner)
+        run: |
+          curl -fsSL -o /tmp/osv-scanner "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64"
+          curl -fsSL -o /tmp/SHA256SUMS "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_SHA256SUMS"
+          grep 'osv-scanner_linux_amd64$' /tmp/SHA256SUMS | sed 's|  osv-scanner_linux_amd64$|  /tmp/osv-scanner|' | sha256sum --check
+          chmod +x /tmp/osv-scanner
+          # --config must be explicit: auto-discovery only finds osv-scanner.toml
+          # for root-level lockfiles, so the watcher scan below ran WITHOUT the
+          # baseline (and failed on the known elliptic advisory) until pinned here.
+          /tmp/osv-scanner scan --config osv-scanner.toml --lockfile package-lock.json
+          # The watcher carries its own lockfile — the PRODUCTION signer tree that
+          # runs in the server image — so it gets its own scan under the same
+          # baseline (ignored IDs that don't occur in its tree print an
+          # informational "unused ignores" line; exit code stays 0).
+          /tmp/osv-scanner scan --config osv-scanner.toml --lockfile watcher/package-lock.json
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Tests (unit + determinism + Postgres parity)
+        run: npx jest --runInBand
+
+      - name: Build
+        run: npm run build
+
+      - name: Compose files parse
+        run: |
+          for f in docker-compose.yml docker-compose.dbnet.yml docker-compose.local-db.yml docker-compose.watcher.yml; do
+            npx js-yaml "$f" > /dev/null && echo "ok: $f"
+          done
+
+      - name: Entrypoint shell syntax
+        run: sh -n docker-entrypoint.sh
+
+      # Advisory visibility for the *production* dependency tree. Known,
+      # documented advisories (docs/SECURITY.md → "Known dependency advisories")
+      # sit below `critical`, so only a new critical advisory fails the build.
+      - name: Dependency audit (production, fails on critical)
+        run: npm audit --omit=dev --audit-level=critical

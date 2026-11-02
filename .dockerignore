@@ -1,0 +1,18 @@
+# Build context hygiene: the image only needs sources + manifests.
+# (Watch both Dockerfiles when editing: root COPYs package manifests, tsconfig.json,
+# prisma/, src/, docker-entrypoint.sh — watcher/ COPYs watcher manifests + scripts/.)
+node_modules
+**/node_modules
+dist
+.git
+.env
+.env.*
+*.log
+coverage
+*.tsbuildinfo
+
+# Not needed to build/run the image (tests run on the host/CI).
+tests
+jest.config.cjs
+README.md
+docker-compose*.yml

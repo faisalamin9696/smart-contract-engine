@@ -1,0 +1,16 @@
+# Attach the engine to an EXTERNAL Docker network so it can resolve the database
+# hostname (e.g. sce-db-xxxxx) by its container/service name.
+#
+#   DB_NETWORK=<network> docker compose -f docker-compose.yml -f docker-compose.dbnet.yml up -d --build
+#
+# Find the name with:   docker network ls   (typically <db-project>_default)
+
+services:
+  engine:
+    networks:
+      - db
+
+networks:
+  db:
+    name: ${DB_NETWORK:?set DB_NETWORK to the Docker network the database is attached to}
+    external: true

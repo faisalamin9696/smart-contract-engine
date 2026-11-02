@@ -1,0 +1,55 @@
+# Dependabot: proposes dependency upgrades as PRs (npm packages + GitHub
+# Actions versions). Security *alerts* are a separate repo setting
+# (Settings -> Code security -> Dependabot alerts; free for private repos) and
+# work regardless of this file.
+#
+# Every PR still has to pass the full CI gate before merging, and prisma is
+# pinned by policy (docs/SECURITY.md) - review prisma-related PRs deliberately,
+# they move the tooling advisory baseline in osv-scanner.toml.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Majors of consensus/runtime/toolchain-critical packages are deliberate,
+    # reviewed migrations (bignumber.js = consensus math; prisma pair = the
+    # boot-critical migrate path; typescript = peer-locked to ts-jest;
+    # express/graphql/ws/zod/isolated-vm = engine runtime). These ignores apply
+    # to VERSION updates only — Dependabot *security* updates are a separate
+    # mechanism and still open (that is how the zod GHSA-mrhx major PR arrived).
+    ignore:
+      - dependency-name: "bignumber.js"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "prisma"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@prisma/client"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "express"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "graphql"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "ws"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "zod"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "isolated-vm"
+        update-types: ["version-update:semver-major"]
+
+  # The watcher ships its own lockfile (the production signer tree behind
+  # docker-compose.watcher.yml) — without this entry Dependabot would never
+  # propose its updates, and a signing-chain advisory would sit unread.
+  - package-ecosystem: npm
+    directory: /watcher
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

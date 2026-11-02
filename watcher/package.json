@@ -1,0 +1,12 @@
+{
+  "name": "sce-watcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WSTEEM bridge watcher (scripts/wsteem.cjs --watch) — key-holding signer that auto-issues deposits and auto-releases peg-outs",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@steempro/dsteem": "^1.0.6"
+  }
+}

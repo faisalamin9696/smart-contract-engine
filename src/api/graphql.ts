@@ -1,0 +1,907 @@
+import { ApolloServer, HeaderMap, type HTTPGraphQLRequest } from '@apollo/server';
+import { GraphQLError, GraphQLScalarType, Kind, getNamedType, isListType, isNonNullType, isObjectType, type DocumentNode, type FieldNode, type FragmentDefinitionNode, type GraphQLObjectType, type GraphQLSchema, type SelectionNode, type ValidationContext, type ValueNode } from 'graphql';
+import type { NextFunction, Request, Response } from 'express';
+
+import {
+  computeBookDepth,
+  getAccount,
+  getBookOrder,
+  getCollection,
+  getInstance,
+  getOrder,
+  getParam,
+  getToken,
+  listMarketTrades,
+  tokenIcon,
+  type EngineStore,
+} from '../state/store';
+import type { Indexer } from '../indexer/indexer';
+import type { Logger } from '../logger';
+
+/** Pagination ceiling — deep offsets are a DoS vector on a public endpoint. */
+const MAX_LIMIT = 100;
+const DEFAULT_LIMIT = 20;
+
+/* ------------------------------------------------------- query cost ceilings */
+/**
+ * Per-request query-cost caps (SECURITY.md → "Query complexity"). GraphQL
+ * validation already bounds *depth* to the schema's shape; the caps that earn
+ * their keep here are **alias breadth** (N copies of a list field = N×100 rows
+ * read) and directive counts. Depth is kept as defence-in-depth for future
+ * schema growth and fragment tricks. Pure constants — tuning them is a code
+ * change, not an env knob, so behaviour is identical on every node.
+ */
+export const MAX_QUERY_DEPTH = 15;
+export const MAX_QUERY_ALIASES = 50;
+export const MAX_QUERY_DIRECTIVES = 100;
+/**
+ * Maximum rows any single root-to-leaf path of an accepted query may request from
+ * the store. Shape ceilings (above) price structure; this prices the multiplicative
+ * work the structure converts into, so the Collection.instances <->
+* Instance.collection resolver cycle cannot turn one small anonymous query into
+ * f^7 rows of fan-out per listed collection (no execution deadline exists to bound
+ * it downstream, and the API shares its process and pool with the indexer).
+ */
+export const MAX_REQUEST_LIST_ROWS = 10_000;
+
+export interface QueryCost {
+  /** Deepest field nesting reached (fragment spreads resolved, cycles guarded). */
+  depth: number;
+  /** Aliased fields — the breadth multiplier stacked on top of list sizes. */
+  aliases: number;
+  /** Total @include/@skip directives (parse/validate CPU). */
+  directives: number;
+}
+
+/**
+ * Measures what a parsed operation actually costs us. Fragment definitions are
+ * followed — an attacker would otherwise hide breadth inside fragments — with a
+ * per-path cycle guard so self-referential fragments terminate (and are rejected
+ * by validation anyway).
+ */
+export function analyzeQuery(document: DocumentNode): QueryCost {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) fragments.set(definition.name.value, definition);
+  }
+  let depth = 0;
+  let aliases = 0;
+  let directives = 0;
+
+  const walk = (selections: readonly SelectionNode[], current: number, spreads: ReadonlySet<string>): void => {
+    for (const selection of selections) {
+      if (selection.kind === Kind.FIELD) {
+        if (selection.alias) aliases += 1;
+        directives += selection.directives?.length ?? 0;
+        const next = current + 1;
+        if (next > depth) depth = next;
+        if (selection.selectionSet) walk(selection.selectionSet.selections, next, spreads);
+      } else if (selection.kind === Kind.INLINE_FRAGMENT) {
+        directives += selection.directives?.length ?? 0;
+        walk(selection.selectionSet.selections, current, spreads);
+      } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
+        directives += selection.directives?.length ?? 0;
+        if (spreads.has(selection.name.value)) continue; // cycle guard
+        const fragment = fragments.get(selection.name.value);
+        if (!fragment) continue; // unresolved — validation rejects it anyway
+        const next = new Set(spreads).add(selection.name.value);
+        walk(fragment.selectionSet.selections, current, next);
+      }
+    }
+  };
+
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.OPERATION_DEFINITION) walk(definition.selectionSet.selections, 0, new Set());
+  }
+  return { depth, aliases, directives };
+}
+
+/** Row factor of one paginated field selection (mirrors the resolvers' clampLimit). */
+function limitRows(selection: FieldNode): number {
+  const arg = selection.arguments?.find((a) => a.name.value === 'limit');
+  if (arg === undefined) return DEFAULT_LIMIT; // resolver default
+  if (arg.value.kind === Kind.INT) {
+    const n = Number.parseInt(arg.value.value, 10);
+    if (Number.isInteger(n) && n >= 1) return Math.min(n, MAX_LIMIT);
+  }
+  return MAX_LIMIT; // variable or nonsense literal: the resolver clamps to MAX_LIMIT
+}
+
+/**
+ * Product of row factors along the most expensive root-to-leaf path of an operation.
+ *
+ * A field is priced when its schema definition declares a `limit` argument — those
+ * are exactly the engine's paginated list fields (REST parity, hard-capped at
+ * MAX_LIMIT); its factor is the literal limit (clamped), the resolver default
+ * (DEFAULT_LIMIT) when omitted, or MAX_LIMIT when the value is a variable (worst
+ * case). Fields without `limit` (singletons, object hops, introspection lists) are
+ * schema-bounded and priced at 1. Pricing keys off the argument, so adding another
+ * paginated list field to the schema extends this budget automatically.
+ *
+ * The walk is TypeInfo-driven (schema-aware) with the same fragment cycle guard as
+ * analyzeQuery. Rejected queries fail validation with BAD_USER_INPUT before any
+ * resolver — and hence before any store read — runs.
+ */
+export function maxListRowsOnAnyPath(document: DocumentNode, schema: GraphQLSchema): number {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) fragments.set(definition.name.value, definition);
+  }
+
+  // Resolve types explicitly against the schema (a hand-rolled walk does not carry
+  // the enter/leave bookkeeping TypeInfo expects, so parent types are tracked here).
+  const objectAt = (typeName: string | undefined, fallback: GraphQLObjectType | null): GraphQLObjectType | null => {
+    if (!typeName) return fallback;
+    const type = schema.getType(typeName);
+    return type !== null && type !== undefined && isObjectType(type) ? type : fallback;
+  };
+
+  const walk = (
+    selections: readonly SelectionNode[],
+    parentType: GraphQLObjectType | null,
+    seen: ReadonlySet<string>,
+  ): number => {
+    let best = 1;
+    for (const selection of selections) {
+      if (selection.kind === Kind.FIELD) {
+        const fieldDef = parentType ? parentType.getFields()[selection.name.value] : undefined;
+        const fieldType = fieldDef?.type;
+        const nonNull =
+          fieldType !== undefined && fieldType !== null && isNonNullType(fieldType) ? fieldType.ofType : fieldType;
+        const isList = nonNull !== null && nonNull !== undefined && isListType(nonNull);
+        const paginated = (fieldDef?.args ?? []).some((a) => a.name === 'limit');
+        let path = isList && paginated ? limitRows(selection) : 1;
+        if (selection.selectionSet) {
+          const named = fieldType !== undefined && fieldType !== null ? getNamedType(fieldType) : null;
+          const childType = named !== null && isObjectType(named) ? named : null;
+          path *= Math.max(walk(selection.selectionSet.selections, childType, seen), 1);
+        }
+        if (path > best) best = path;
+      } else if (selection.kind === Kind.INLINE_FRAGMENT) {
+        const childType = objectAt(selection.typeCondition?.name.value, parentType);
+        best = Math.max(best, walk(selection.selectionSet.selections, childType, seen));
+      } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
+        if (seen.has(selection.name.value)) continue; // cycle guard
+        const fragment = fragments.get(selection.name.value);
+        if (!fragment) continue; // unresolved — validation rejects it anyway
+        const childType = objectAt(fragment.typeCondition.name.value, parentType);
+        const rows = walk(fragment.selectionSet.selections, childType, new Set(seen).add(selection.name.value));
+        if (rows > best) best = rows;
+      }
+    }
+    return best;
+  };
+
+  let rows = 1;
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.OPERATION_DEFINITION) {
+      const rootType =
+        definition.operation === 'mutation'
+          ? schema.getMutationType()
+          : definition.operation === 'subscription'
+            ? schema.getSubscriptionType()
+            : schema.getQueryType();
+      rows = Math.max(rows, walk(definition.selectionSet.selections, rootType ?? null, new Set()));
+    }
+  }
+  return rows;
+}
+
+/**
+ * Validation rule enforcing {@link analyzeQuery}'s ceilings. Reporting through
+ * `context.reportError` (instead of throwing mid-pipeline) makes graphql-js
+ * fail validation normally: the request is answered **400** with the error's
+ * `BAD_USER_INPUT` code and *no resolver ever runs*.
+ */
+export function queryCostRule(context: ValidationContext) {
+  let checked = false;
+  return {
+    OperationDefinition(): void {
+      if (checked) return; // analyzeQuery measures the whole document at once
+      checked = true;
+      const cost = analyzeQuery(context.getDocument());
+      const rows = maxListRowsOnAnyPath(context.getDocument(), context.getSchema());
+      if (
+        cost.depth > MAX_QUERY_DEPTH ||
+        cost.aliases > MAX_QUERY_ALIASES ||
+        cost.directives > MAX_QUERY_DIRECTIVES ||
+        rows > MAX_REQUEST_LIST_ROWS
+      ) {
+        context.reportError(
+          new GraphQLError(
+            `query rejected: depth ${cost.depth}/${MAX_QUERY_DEPTH}, aliases ${cost.aliases}/${MAX_QUERY_ALIASES}, directives ${cost.directives}/${MAX_QUERY_DIRECTIVES}, list-rows ${rows}/${MAX_REQUEST_LIST_ROWS}`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          ),
+        );
+      }
+    },
+  };
+}
+
+export interface GraphQLContext {
+  store: EngineStore;
+  indexer: Indexer;
+  storage: 'postgres' | 'memory';
+}
+
+export const typeDefs = /* GraphQL */ `
+  scalar JSON
+
+  enum OrderStatus {
+    OPEN
+    FILLED
+    CANCELLED
+  }
+
+  enum TxStatus {
+    APPLIED
+    FAILED
+    IGNORED
+  }
+
+  "NFT series definition."
+  type Collection {
+    symbol: String!
+    name: String!
+    issuer: String!
+    "Project URL (wiki updateUrl)"
+    url: String!
+    "Company/organization (wiki updateOrgName)"
+    orgName: String!
+    "Product/brand (wiki updateProductName)"
+    productName: String!
+    "0 = unlimited"
+    maxSupply: String!
+    "Tokens ever issued — the id sequence"
+    supply: String!
+    burned: String!
+    "supply - burned"
+    circulatingSupply: String!
+    "Accounts allowed to issue (max 10)"
+    authorizedIssuingAccounts: [String!]!
+    "Smart contracts allowed to issue (max 10)"
+    authorizedIssuingContracts: [String!]!
+    "Declared data-property schemas, keyed by property name"
+    properties: JSON!
+    "Market grouping (set once; empty = not yet set)"
+    groupBy: [String!]!
+    royaltyBps: String!
+    royaltyRecipient: String!
+    "Free-form token metadata (wiki updateMetadata)"
+    metadata: JSON!
+    createdAtBlock: Int!
+    createdAt: String!
+    instances(limit: Int = 20, offset: Int = 0): [Instance!]!
+    instanceCount: Int!
+  }
+
+  "A single minted NFT."
+  type Instance {
+    "Wiki token id — unique per symbol; combine with symbol for a global reference"
+    id: String!
+    symbol: String!
+    seq: Int!
+    owner: String!
+    properties: JSON!
+    listedOrderId: String
+    "Previous holder, set after the first transfer/sale"
+    previousAccount: String
+    createdAtBlock: Int!
+    createdAt: String!
+    collection: Collection
+  }
+
+  type Account {
+    name: String!
+    createdAtBlock: Int!
+    createdAt: String!
+    instances(limit: Int = 20, offset: Int = 0): [Instance!]!
+    instanceCount: Int!
+  }
+
+  "Fungible token row (wiki tokens contract)."
+  type Token {
+    symbol: String!
+    name: String!
+    "Decimal places (0-8)"
+    precision: Int!
+    "0 = unlimited"
+    maxSupply: String!
+    "Issued minus burned (decimal string)"
+    supply: String!
+    issuer: String!
+    url: String!
+    "Free-form metadata (plain string, at most 1000 chars)"
+    metadata: String!
+    "Icon URL projected from metadata.icon (empty string when absent)"
+    icon: String!
+    createdAtBlock: Int!
+    createdAt: String!
+  }
+
+  "One holder's balance for one token (keyed account + symbol)."
+  type Balance {
+    account: String!
+    symbol: String!
+    quantity: String!
+  }
+
+  "In-state engine parameters: admin, treasury and the fee schedule."
+  type Params {
+    admin: String!
+    treasury: String!
+    fees: FeeSchedule!
+    "Symbols accepted for fee payment (chargeFee validation)"
+    feeTokens: [String!]!
+  }
+
+  "Fee schedule charged on state-changing actions."
+  type FeeSchedule {
+    nftCreationFee: String!
+    addPropertyFee: String!
+    tokenCreationFee: String!
+    issueFee: String!
+    "Marketplace fill fee in basis points, credited to the treasury"
+    fillOrderFeeBps: String!
+    "Fungible market trade fee in basis points (absence = 0; raised via setParam)"
+    tradeFeeBps: String!
+  }
+
+  type Settlement {
+    price: String!
+    royalty: String!
+    fee: String
+    sellerProceeds: String!
+    royaltyRecipient: String!
+    buyer: String!
+    seller: String!
+  }
+
+  "Marketplace order (list / fill / cancel)."
+  type Order {
+    id: String!
+    symbol: String!
+    instanceId: String!
+    seller: String!
+    price: String!
+    priceSymbol: String!
+    status: OrderStatus!
+    royaltyBps: String!
+    royaltyRecipient: String!
+    createdAtBlock: Int!
+    updatedAtBlock: Int!
+    filledAtBlock: Int
+    fillBy: String
+    settlement: Settlement
+    instance: Instance
+  }
+
+  enum Side {
+    BUY
+    SELL
+  }
+
+  "Fungible market book order (docs/MARKET-DESIGN.md — market.buy/sell/cancel)."
+  type BookOrder {
+    id: String!
+    "Order owner: the only account that may cancel it"
+    account: String!
+    side: Side!
+    "Base token being traded"
+    symbol: String!
+    "Quote/settlement token (escrow denomination for BUY orders)"
+    quote: String!
+    "Remaining base quantity (decimal string)"
+    quantity: String!
+    "Cumulative base quantity filled so far"
+    filled: String!
+    "Limit price: quote units per base unit"
+    price: String!
+    "Remaining escrow: quote units (BUY) or base units (SELL)"
+    escrow: String!
+    status: OrderStatus!
+    createdAtBlock: Int!
+    updatedAtBlock: Int!
+    filledAtBlock: Int
+  }
+
+  "One aggregated price level of the fungible book."
+  type BookLevel {
+    price: String!
+    "Summed remaining base quantity at this price (exact decimal math)"
+    quantity: String!
+    "Number of resting orders contributing to the level"
+    orders: Int!
+  }
+
+  type BookDepth {
+    "BUY levels, best (highest) price first"
+    bids: [BookLevel!]!
+    "SELL levels, best (lowest) price first"
+    asks: [BookLevel!]!
+  }
+
+  "One fill between a BUY and a SELL order (maker priority)."
+  type MarketTrade {
+    height: Int!
+    timestamp: String!
+    txId: String!
+    opIndex: Int!
+    buyOrderId: String!
+    sellOrderId: String!
+    buyer: String!
+    seller: String!
+    "Base token"
+    base: String!
+    "Quote/settlement token"
+    quote: String!
+    quantity: String!
+    "Execution price (the resting order's price)"
+    price: String!
+    cost: String!
+    "Treasury cut of the quote proceeds"
+    fee: String!
+  }
+
+  "Deterministic execution trace of one operation."
+  type TransactionLog {
+    id: String!
+    height: Int!
+    blockId: String!
+    txId: String!
+    opIndex: Int!
+    action: String!
+    actor: String!
+    authLevel: String!
+    symbol: String
+    instanceId: String
+    status: TxStatus!
+    params: JSON!
+    error: JSON
+    mutations: JSON
+    events: JSON
+    timestamp: String!
+  }
+
+  type Block {
+    height: Int!
+    blockId: String!
+    previous: String!
+    timestamp: String!
+    txCount: Int!
+    opCount: Int!
+    appliedAt: String!
+  }
+
+  type EngineStats {
+    blocksApplied: Int!
+    blocksRolledBack: Int!
+    opsApplied: Int!
+    opsFailed: Int!
+    reorgs: Int!
+    lastBlockAt: String
+    consecutiveFailures: Int!
+  }
+
+  type EngineStatus {
+    "custom_json namespace this instance consumes (e.g. sce-mainnet1, sce-testnet1)"
+    opId: String!
+    running: Boolean!
+    headHeight: Int!
+    cursorHeight: Int!
+    sandbox: String!
+    storage: String!
+    undoDepth: Int!
+    redoSize: Int!
+    stats: EngineStats!
+  }
+
+  type Query {
+    collections(limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Collection!]!
+    collection(symbol: String!): Collection
+    instances(owner: String, symbol: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Instance!]!
+    instance(id: String!, symbol: String): Instance
+    account(name: String!): Account
+    tokens(issuer: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Token!]!
+    token(symbol: String!): Token
+    balances(
+      account: String!
+      symbol: String
+      limit: Int = ${DEFAULT_LIMIT}
+      offset: Int = 0
+    ): [Balance!]!
+    params: Params
+    orders(status: OrderStatus, symbol: String, seller: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [Order!]!
+    order(id: String!): Order
+    bookOrders(
+      status: OrderStatus
+      side: Side
+      symbol: String
+      quote: String
+      account: String
+      limit: Int = ${DEFAULT_LIMIT}
+      offset: Int = 0
+    ): [BookOrder!]!
+    bookOrder(id: String!): BookOrder
+    "Aggregated depth (bids/asks) for one trading pair."
+    book(symbol: String!, quote: String!): BookDepth!
+    "Recent fills, newest market ops first (paginated per operation)."
+    trades(symbol: String, quote: String, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [MarketTrade!]!
+    logs(actor: String, instanceId: String, symbol: String, height: Int, status: TxStatus, limit: Int = ${DEFAULT_LIMIT}, offset: Int = 0): [TransactionLog!]!
+    block(height: Int!): Block
+    latestBlock: Block
+    status: EngineStatus!
+  }
+`;
+
+/* ------------------------------------------------------------------ JSON scalar */
+
+function astToJson(node: ValueNode): unknown {
+  switch (node.kind) {
+    case Kind.STRING:
+    case Kind.ENUM:
+      return node.value;
+    case Kind.INT:
+      return Number.parseInt(node.value, 10);
+    case Kind.FLOAT:
+      // Literals with a decimal point are refused: the engine never emits them.
+      throw new GraphQLError('floating point literals are not supported (determinism)');
+    case Kind.BOOLEAN:
+      return node.value;
+    case Kind.NULL:
+      return null;
+    case Kind.LIST:
+      return node.values.map(astToJson);
+    case Kind.OBJECT: {
+      const out: Record<string, unknown> = {};
+      for (const field of node.fields) out[field.name.value] = astToJson(field.value);
+      return out;
+    }
+    default:
+      throw new GraphQLError(`unsupported literal kind: ${node.kind}`);
+  }
+}
+
+const JSONScalar = new GraphQLScalarType<unknown, unknown>({
+  name: 'JSON',
+  description: 'Arbitrary JSON value (integers only — floats are rejected for determinism).',
+  serialize: (value) => value,
+  parseValue: (value) => value,
+  parseLiteral: astToJson,
+});
+
+/* ------------------------------------------------------------------- helpers */
+
+function clampLimit(limit: number | null | undefined): number {
+  const n = limit ?? DEFAULT_LIMIT;
+  if (!Number.isInteger(n) || n < 1) throw new GraphQLError('limit must be a positive integer');
+  return Math.min(n, MAX_LIMIT);
+}
+
+function clampOffset(offset: number | null | undefined): number {
+  const n = offset ?? 0;
+  if (!Number.isInteger(n) || n < 0) throw new GraphQLError('offset must be a non-negative integer');
+  return n;
+}
+
+/* ------------------------------------------------------------------ resolvers */
+
+function buildResolvers() {
+  return {
+    JSON: JSONScalar,
+
+    // icon: read-side projection of the token's metadata string (tokenIcon()).
+    Token: {
+      icon: (parent: { metadata: string }) => tokenIcon(parent.metadata),
+    },
+
+    Query: {
+      collections: (_: unknown, args: { limit?: number; offset?: number }, ctx: GraphQLContext) =>
+        ctx.store.listCollections(clampLimit(args.limit), clampOffset(args.offset)),
+
+      collection: (_: unknown, args: { symbol: string }, ctx: GraphQLContext) =>
+        getCollection(ctx.store, args.symbol),
+
+      instances: (
+        _: unknown,
+        args: { owner?: string; symbol?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listInstances({
+          owner: args.owner ?? undefined,
+          symbol: args.symbol ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      instance: (
+        _: unknown,
+        args: { id: string; symbol?: string },
+        ctx: GraphQLContext,
+      ) => getInstance(ctx.store, args.id, args.symbol ?? undefined),
+
+      account: (_: unknown, args: { name: string }, ctx: GraphQLContext) =>
+        getAccount(ctx.store, args.name),
+
+      tokens: (
+        _: unknown,
+        args: { issuer?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listTokens({
+          issuer: args.issuer ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      token: (_: unknown, args: { symbol: string }, ctx: GraphQLContext) =>
+        getToken(ctx.store, args.symbol),
+
+      balances: (
+        _: unknown,
+        args: { account: string; symbol?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listBalances({
+          account: args.account,
+          symbol: args.symbol ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      params: (_: unknown, __: unknown, ctx: GraphQLContext) => getParam(ctx.store),
+
+      orders: (
+        _: unknown,
+        args: { status?: string; symbol?: string; seller?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listOrders({
+          status: (args.status ?? undefined) as never,
+          symbol: args.symbol ?? undefined,
+          seller: args.seller ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      order: (_: unknown, args: { id: string }, ctx: GraphQLContext) =>
+        getOrder(ctx.store, args.id),
+
+      bookOrders: (
+        _: unknown,
+        args: {
+          status?: string;
+          side?: string;
+          symbol?: string;
+          quote?: string;
+          account?: string;
+          limit?: number;
+          offset?: number;
+        },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listBookOrders({
+          status: (args.status ?? undefined) as never,
+          side: (args.side ?? undefined) as never,
+          symbol: args.symbol ?? undefined,
+          quote: args.quote ?? undefined,
+          account: args.account ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      bookOrder: (_: unknown, args: { id: string }, ctx: GraphQLContext) =>
+        getBookOrder(ctx.store, args.id),
+
+      book: (_: unknown, args: { symbol: string; quote: string }, ctx: GraphQLContext) =>
+        computeBookDepth(ctx.store, args.symbol, args.quote),
+
+      trades: (
+        _: unknown,
+        args: { symbol?: string; quote?: string; limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        listMarketTrades(ctx.store, {
+          symbol: args.symbol ?? undefined,
+          quote: args.quote ?? undefined,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      logs: (
+        _: unknown,
+        args: {
+          actor?: string;
+          instanceId?: string;
+          symbol?: string;
+          height?: number;
+          status?: string;
+          limit?: number;
+          offset?: number;
+        },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listLogs({
+          actor: args.actor ?? undefined,
+          instanceId: args.instanceId ?? undefined,
+          symbol: args.symbol ?? undefined,
+          height: args.height,
+          status: (args.status ?? undefined) as never,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+
+      block: (_: unknown, args: { height: number }, ctx: GraphQLContext) =>
+        ctx.store.getBlock(args.height),
+
+      latestBlock: (_: unknown, __: unknown, ctx: GraphQLContext) => ctx.store.getLatestBlock(),
+
+      status: async (_: unknown, __: unknown, ctx: GraphQLContext) => {
+        const status = ctx.indexer.status() as {
+          running: boolean;
+          headHeight: number;
+          sandbox: string;
+          opId: string;
+          buffer: { undoDepth: number; redoSize: number };
+          stats: Record<string, number | string | null>;
+        };
+        const cursor = await ctx.indexer.cursor();
+        return {
+          running: status.running,
+          headHeight: status.headHeight,
+          cursorHeight: cursor?.height ?? 0,
+          opId: status.opId,
+          sandbox: status.sandbox,
+          storage: ctx.storage,
+          undoDepth: status.buffer.undoDepth,
+          redoSize: status.buffer.redoSize,
+          stats: status.stats,
+        };
+      },
+    },
+
+    Collection: {
+      instances: (
+        parent: { symbol: string },
+        args: { limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listInstances({
+          symbol: parent.symbol,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+      instanceCount: (parent: { symbol: string }, _: unknown, ctx: GraphQLContext) =>
+        ctx.store.countInstances({ symbol: parent.symbol }),
+    },
+
+    Instance: {
+      collection: (parent: { symbol: string }, _: unknown, ctx: GraphQLContext) =>
+        getCollection(ctx.store, parent.symbol),
+    },
+
+    Account: {
+      instances: (
+        parent: { name: string },
+        args: { limit?: number; offset?: number },
+        ctx: GraphQLContext,
+      ) =>
+        ctx.store.listInstances({
+          owner: parent.name,
+          limit: clampLimit(args.limit),
+          offset: clampOffset(args.offset),
+        }),
+      instanceCount: (parent: { name: string }, _: unknown, ctx: GraphQLContext) =>
+        ctx.store.countInstances({ owner: parent.name }),
+    },
+
+    FeeSchedule: {
+      // Absence means zero: param rows written before the market contract existed
+      // (and their undo before-images) carry no tradeFeeBps key.
+      tradeFeeBps: (parent: { tradeFeeBps?: string }) => parent.tradeFeeBps ?? '0',
+    },
+
+    Order: {
+      instance: (parent: { instanceId: string }, _: unknown, ctx: GraphQLContext) =>
+        getInstance(ctx.store, parent.instanceId),
+    },
+  };
+}
+
+/* ------------------------------------------------------------------- factory */
+
+export interface GraphQLDeps {
+  store: EngineStore;
+  indexer: Indexer;
+  storage: 'postgres' | 'memory';
+  logger: Logger;
+}
+
+export type GraphQLHandler = (req: Request, res: Response, next: NextFunction) => void;
+
+export interface GraphQLHandle {
+  server: ApolloServer<GraphQLContext>;
+  /** Ready-to-mount express handler (context is bound at construction). */
+  handler: GraphQLHandler;
+}
+
+function toHeaderMap(req: Request): HeaderMap {
+  const headers = new HeaderMap();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+  }
+  return headers;
+}
+
+/**
+ * Minimal express adapter around `executeHTTPGraphQLRequest`.
+ *
+ * Apollo Server 5 ships no express integration (the v4 `express4` entrypoint was
+ * removed), so we bridge the supported low-level HTTP API ourselves: parse once, forward
+ * headers/query/body, then stream the response back verbatim.
+ */
+function createHandler(
+  server: ApolloServer<GraphQLContext>,
+  context: () => Promise<GraphQLContext>,
+): GraphQLHandler {
+  return (req, res, next) => {
+    void (async () => {
+      const url = req.originalUrl || req.url;
+      const queryIndex = url.indexOf('?');
+      const search = queryIndex >= 0 ? url.slice(queryIndex + 1) : '';
+      const httpGraphQLRequest: HTTPGraphQLRequest = {
+        method: req.method,
+        headers: toHeaderMap(req),
+        search,
+        body: req.body,
+      };
+      const response = await server.executeHTTPGraphQLRequest({
+        httpGraphQLRequest,
+        context,
+      });
+      res.status(response.status ?? 200);
+      for (const [key, value] of response.headers) res.setHeader(key, value);
+      if (response.body.kind === 'complete') {
+        res.send(response.body.string);
+        return;
+      }
+      // Incremental delivery (defer/stream): pipe chunks as they are produced.
+      for await (const chunk of response.body.asyncIterator) {
+        res.write(chunk);
+      }
+      res.end();
+    })().catch(next);
+  };
+}
+
+export async function createGraphQL(deps: GraphQLDeps): Promise<GraphQLHandle> {
+  const logger = deps.logger;
+  const server = new ApolloServer<GraphQLContext>({
+    typeDefs,
+    resolvers: buildResolvers(),
+    introspection: true,
+    includeStacktraceInErrorResponses: false,
+    validationRules: [queryCostRule],
+    plugins: [
+      {
+        async requestDidStart() {
+          return {
+            async didEncounterErrors({ errors }) {
+              for (const error of errors) {
+                logger.warn('graphql error', { message: error.message });
+              }
+            },
+          };
+        },
+      },
+    ],
+  });
+  await server.start();
+  const handler = createHandler(server, async () => ({
+    store: deps.store,
+    indexer: deps.indexer,
+    storage: deps.storage,
+  }));
+  return { server, handler };
+}

@@ -1,0 +1,56 @@
+{
+  "name": "smart-contract-engine",
+  "version": "1.0.0",
+  "description": "SCE - Smart Contract Engine: deterministic Steem Layer 2 smart-contract engine (nft / tokens / engine contracts): block ingestion, sandboxed execution VM, off-chain state DB, GraphQL/REST/WebSocket APIs.",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "test": "jest --runInBand",
+    "test:unit": "jest --runInBand tests/unit",
+    "test:integration": "jest --runInBand tests/integration",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@apollo/server": "^5.5.1",
+    "@prisma/client": "^6.13.0",
+    "bignumber.js": "^9.3.1",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.6",
+    "express": "^4.21.2",
+    "graphql": "^16.9.0",
+    "isolated-vm": "^7.0.1",
+    "prisma": "^6.13.0",
+    "ws": "^8.18.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@steempro/dsteem": "^1.0.6",
+    "@types/compression": "^1.7.5",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.5.13",
+    "jest": "^30.5.2",
+    "ts-jest": "^29.4.14",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.2",
+    "glob": "^14.0.2",
+    "minimatch": "^11.0.1"
+  }
+}
