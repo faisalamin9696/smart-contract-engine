@@ -45,6 +45,54 @@ describe('loadConfig storage selection', () => {
   });
 });
 
+describe('loadConfig RPC selection (strategy + schedule)', () => {
+  test('defaults to round-robin with no schedule windows', () => {
+    const config = loadConfig({});
+    expect(config.rpcStrategy).toBe('rotate');
+    expect(config.rpcSchedule).toEqual([]);
+  });
+
+  test('parses pinned windows (end exclusive; -00:00 means midnight)', () => {
+    const config = loadConfig({
+      STEEM_RPC_ENDPOINTS: 'https://api.steemit.com,https://api.justyy.com',
+      STEEM_RPC_SCHEDULE: '00:00-06:00=https://api.steemit.com,22:00-00:00=https://api.justyy.com',
+    });
+    expect(config.rpcSchedule).toEqual([
+      { startMin: 0, endMin: 360, url: 'https://api.steemit.com' },
+      { startMin: 1320, endMin: 1440, url: 'https://api.justyy.com' },
+    ]);
+  });
+
+  test('accepts an explicit sticky strategy and rejects an unknown one', () => {
+    expect(loadConfig({ STEEM_RPC_STRATEGY: 'sticky' }).rpcStrategy).toBe('sticky');
+    expect(() => loadConfig({ STEEM_RPC_STRATEGY: 'random' })).toThrow(/STEEM_RPC_STRATEGY/);
+  });
+
+  test('rejects a schedule entry with an unparseable time', () => {
+    expect(() => loadConfig({ STEEM_RPC_SCHEDULE: '6am-9am=https://api.steemit.com' })).toThrow(
+      /STEEM_RPC_SCHEDULE/,
+    );
+  });
+
+  test('rejects a window whose start equals its end (empty window)', () => {
+    expect(() =>
+      loadConfig({
+        STEEM_RPC_ENDPOINTS: 'https://api.steemit.com',
+        STEEM_RPC_SCHEDULE: '06:00-06:00=https://api.steemit.com',
+      }),
+    ).toThrow(/empty window/);
+  });
+
+  test('rejects pinning an endpoint that is not in STEEM_RPC_ENDPOINTS', () => {
+    expect(() =>
+      loadConfig({
+        STEEM_RPC_ENDPOINTS: 'https://api.steemit.com',
+        STEEM_RPC_SCHEDULE: '00:00-06:00=https://api.justyy.com',
+      }),
+    ).toThrow(/not in STEEM_RPC_ENDPOINTS/);
+  });
+});
+
 describe('maskDatabaseUrl', () => {
   test('masks the password but keeps host and database', () => {
     expect(maskDatabaseUrl('postgresql://user:secret@db.internal:5432/sce')).toBe(

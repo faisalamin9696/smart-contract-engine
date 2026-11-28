@@ -10,17 +10,17 @@ an off-chain state database, and exposes that state through REST, GraphQL and We
 *The protocol is branded **SCE**; the frontend dApps — NFTs, tokens, marketplace — build on top of it.*
 
 ```
- Steem RPC (failover)          engine process                      clients
-┌──────────────────┐   ┌───────────────────────────────────┐   ┌──────────────┐
-│ api.steemit.com  │──▶│ BlockStreamer ─▶ Indexer          │──▶│ REST  /api/v1│
-│ api.steemyy.com  │   │   │ fork detect / undo-redo       │   │ GQL   /graphql│
-│ api.moecki.online│   │   ▼                               │   │ WS    :4001  │
-└──────────────────┘   │ opParser ─▶ executor ─▶ sandbox VM│   └──────────────┘
-                       │   │  (isolated-vm / node-vm)      │
-                       │   ▼                               │
-                       │ guard ─▶ StateTxn ─▶ EngineStore   │
-                       │        (journal, atomic per block) │
-                       └───────────────────────────────────┘
+ Steem RPC (round-robin + failover)   engine process                      clients
+┌─────────────────────────┐   ┌───────────────────────────────────┐   ┌──────────────┐
+│ api.steemit.com         │──▶│ BlockStreamer ─▶ Indexer          │──▶│ REST  /api/v1│
+│ api.justyy.com          │   │   │ fork detect / undo-redo       │   │ GQL   /graphql│
+│ api.moecki.online       │   │   ▼                               │   │ WS    :4001  │
+│ steemd.steemworld.org   │   │ opParser ─▶ executor ─▶ sandbox VM│   └──────────────┘
+└─────────────────────────┘   │   │  (isolated-vm / node-vm)      │
+                              │   ▼                               │
+                              │ guard ─▶ StateTxn ─▶ EngineStore   │
+                              │        (journal, atomic per block) │
+                              └───────────────────────────────────┘
                                      │
                        ┌─────────────▼─────────────┐
                        │ PostgreSQL (Prisma)       │  or MemoryStore (dev/tests)
@@ -366,7 +366,9 @@ right (see above).
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `STEEM_RPC_ENDPOINTS` | `https://api.steemit.com,https://api.steemyy.com,https://api.moecki.online` | comma-separated failover list |
+| `STEEM_RPC_ENDPOINTS` | `https://api.steemit.com,https://api.justyy.com,https://api.moecki.online,https://steemd.steemworld.org` | comma-separated list; healthy endpoints share the load round-robin, failing ones drop out with cooldown/backoff automatically |
+| `STEEM_RPC_STRATEGY` | `rotate` | `rotate` = round-robin load division; `sticky` = pin each request to the last endpoint that answered (fail over only when it errors) |
+| `STEEM_RPC_SCHEDULE` | *(unset)* | pin all load to one endpoint during a UTC window, e.g. `00:00-06:00=https://api.steemit.com,06:00-12:00=https://api.justyy.com` — end exclusive, `end < start` wraps past midnight, first match wins |
 | `BLOCK_POLL_INTERVAL_MS` | `3000` | ≥1000 (Steem block time) |
 | `UNDO_BUFFER_DEPTH` | `30` | rolling undo/redo size |
 | `SCE_OP_ID` | `sce-mainnet1` | `custom_json` id to consume |

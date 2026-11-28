@@ -13,6 +13,8 @@ jest.setTimeout(60_000);
 
 const CONFIG: Config = {
   rpcEndpoints: ['http://localhost:1'],
+  rpcStrategy: 'sticky', // single mock endpoint — selection policy is irrelevant here
+  rpcSchedule: [],
   blockPollIntervalMs: 1000,
   undoBufferDepth: 30,
   opId: 'sce-mainnet1',

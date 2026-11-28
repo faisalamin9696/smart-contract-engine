@@ -1,5 +1,7 @@
 import dotenv from 'dotenv';
 
+import type { RpcScheduleWindow, RpcStrategy } from './chain/rpc';
+
 dotenv.config();
 
 /**
@@ -11,6 +13,19 @@ dotenv.config();
  */
 export interface Config {
   readonly rpcEndpoints: string[];
+  /**
+   * Endpoint selection policy (STEEM_RPC_STRATEGY): `rotate` (default) divides
+   * steady-state load round-robin across healthy endpoints; `sticky` pins to the
+   * last endpoint that answered. Automatic failover (cooldown + backoff + walk the
+   * remaining candidates) applies in both modes.
+   */
+  readonly rpcStrategy: RpcStrategy;
+  /**
+   * Time windows (STEEM_RPC_SCHEDULE) pinning all load to one endpoint — e.g. give
+   * one node the busy hours. Empty = no pinning. A pinned endpoint that is failing
+   * falls back to the regular policy until its cooldown expires.
+   */
+  readonly rpcSchedule: readonly RpcScheduleWindow[];
   readonly blockPollIntervalMs: number;
   readonly undoBufferDepth: number;
   readonly opId: string;
@@ -76,8 +91,8 @@ function bool(name: string, fallback: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
 }
 
-function list(name: string, fallback: string[]): string[] {
-  const raw = process.env[name];
+function list(env: NodeJS.ProcessEnv, name: string, fallback: string[]): string[] {
+  const raw = env[name];
   if (raw === undefined || raw === '') return fallback;
   const items = raw
     .split(',')
@@ -87,14 +102,69 @@ function list(name: string, fallback: string[]): string[] {
   return items;
 }
 
-// Verified reachable (failover order): the engine rotates + backs off on failure anyway.
+// Verified reachable 2026-11-28 (appbase JSON-RPC `call`, heads within one block of
+// each other). Load is divided round-robin across this list (STEEM_RPC_STRATEGY),
+// failing endpoints drop out with cooldown/backoff automatically, and
+// STEEM_RPC_SCHEDULE can pin a UTC time window to one of them.
 const DEFAULT_ENDPOINTS = [
   'https://api.steemit.com',
-  'https://api.steemyy.com',
+  'https://api.justyy.com',
   'https://api.moecki.online',
+  'https://steemd.steemworld.org',
 ];
 
 const LOG_LEVELS: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+
+/** `STEEM_RPC_STRATEGY` — endpoint selection policy (default: rotate). */
+function rpcStrategy(raw: string | undefined): RpcStrategy {
+  if (raw === undefined || raw.trim() === '') return 'rotate';
+  const value = raw.trim();
+  if (value === 'rotate' || value === 'sticky') return value;
+  throw new Error(`Invalid STEEM_RPC_STRATEGY: ${raw} (expected rotate | sticky)`);
+}
+
+/**
+ * `STEEM_RPC_SCHEDULE` → time windows pinning all load to one endpoint.
+ *
+ * Format: `HH:MM-HH:MM=<url>[,HH:MM-HH:MM=<url>…]`, minutes are UTC, the end is
+ * exclusive, and `00:00` AS THE END means midnight (so `22:00-00:00` runs to
+ * midnight and `00:00-00:00` covers the whole day); an end earlier than the start
+ * wraps past midnight (`23:00-01:00`). With overlapping windows the FIRST match
+ * wins. Every URL must appear in the endpoint list — a pin to an endpoint that is
+ * not configured can never be honoured, so that is a startup error rather than a
+ * silently ignored window.
+ */
+function rpcSchedule(endpoints: string[], raw: string | undefined): RpcScheduleWindow[] {
+  if (raw === undefined || raw.trim() === '') return [];
+  const windows: RpcScheduleWindow[] = [];
+  for (const entry of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const m = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})=(\S+)$/.exec(entry);
+    if (!m) {
+      throw new Error(
+        `Invalid STEEM_RPC_SCHEDULE entry: ${entry} (expected HH:MM-HH:MM=<url>, e.g. 00:00-06:00=https://api.steemit.com)`,
+      );
+    }
+    const [startH, startM, endH, endM] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+    const url = m[5];
+    if (startM > 59 || endM > 59 || startH > 23 || endH > 24 || (endH === 24 && endM > 0)) {
+      throw new Error(`Invalid STEEM_RPC_SCHEDULE time in: ${entry} (hours 00-23, minutes 00-59; 24:00 only as end)`);
+    }
+    const startMin = startH * 60 + startM;
+    // `-00:00` means "until midnight" (a 1440-minute end), not an empty window at 0.
+    const endRaw = endH * 60 + endM;
+    const endMin = endRaw === 0 ? 1440 : endRaw;
+    if (startMin === endMin) {
+      throw new Error(`Invalid STEEM_RPC_SCHEDULE window: ${entry} (start equals end — empty window)`);
+    }
+    if (!endpoints.includes(url)) {
+      throw new Error(
+        `STEEM_RPC_SCHEDULE pins ${url} which is not in STEEM_RPC_ENDPOINTS (configured: ${endpoints.join(', ')})`,
+      );
+    }
+    windows.push({ startMin, endMin, url });
+  }
+  return windows;
+}
 
 /**
  * Strips one matching pair of surrounding quotes and surrounding whitespace.
@@ -143,8 +213,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error('BLOCK_POLL_INTERVAL_MS must be >= 1000');
   }
 
+  const rpcEndpoints = list(env, 'STEEM_RPC_ENDPOINTS', DEFAULT_ENDPOINTS);
+
   return Object.freeze({
-    rpcEndpoints: list('STEEM_RPC_ENDPOINTS', DEFAULT_ENDPOINTS),
+    rpcEndpoints,
+    rpcStrategy: rpcStrategy(env.STEEM_RPC_STRATEGY),
+    rpcSchedule: Object.freeze(rpcSchedule(rpcEndpoints, env.STEEM_RPC_SCHEDULE)),
     blockPollIntervalMs: pollMs,
     undoBufferDepth: int('UNDO_BUFFER_DEPTH', 30, 1),
     opId: env.SCE_OP_ID ?? 'sce-mainnet1',

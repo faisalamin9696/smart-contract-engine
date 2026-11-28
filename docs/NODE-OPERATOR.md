@@ -51,7 +51,9 @@ Docker users: see the compose variants in the README (the image entrypoint runs
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `STEEM_RPC_ENDPOINTS` | three public endpoints | comma-separated. **Use ≥ 2, ideally 3, independent endpoints** — that is what powers quorum verification. Best: your own full node (`http://<your-node>:8090`) plus two public ones. |
+| `STEEM_RPC_ENDPOINTS` | four public endpoints | comma-separated. **Use ≥ 2, ideally 3+, independent endpoints** — that is what powers quorum verification and load division. Best: your own full node (`http://<your-node>:8090`) plus two public ones. |
+| `STEEM_RPC_STRATEGY` | `rotate` | `rotate` divides load round-robin across healthy endpoints; `sticky` pins each request to the last endpoint that answered. Failover (cooldown + backoff) applies either way. |
+| `STEEM_RPC_SCHEDULE` | *(unset)* | pin all load to one endpoint during a UTC window — e.g. `00:00-06:00=https://api.steemit.com` puts the quiet-hours load on that node; failover still applies inside the window. |
 | `DATABASE_URL` | — | your PostgreSQL. `STORAGE=postgres` refuses to start without it (no silent in-memory mode). Append `?connection_limit=N` to size the Prisma pool (default ≈ CPU cores×2+1) under heavy API traffic. |
 | `SCE_OP_ID` | `sce-mainnet1` | mainnet operation id. Different id ⇒ an isolated network of your own (testnet-style — see [TESTNET.md](TESTNET.md)). |
 | `START_BLOCK_HEIGHT` | *(unset ⇒ current head)* | where a fresh DB starts indexing — see §4. |

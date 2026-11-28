@@ -107,6 +107,31 @@ export function createJsonRpcCaller(url: string, timeoutMs: number): RpcCaller {
   };
 }
 
+/**
+ * Endpoint selection policy for the next primary request when no schedule window
+ * pins the load (see {@link RpcScheduleWindow}):
+ *
+ *  - `rotate` (default) — round-robin across healthy endpoints, so steady-state
+ *    request load is divided evenly over the configured list instead of pinning
+ *    every call to one node;
+ *  - `sticky` — always start at the last endpoint that answered (classic
+ *    primary-with-failover behaviour).
+ *
+ * Either way a failing endpoint is taken out of rotation with backoff and the
+ * request walks the remaining candidates, so automatic failover holds in both modes.
+ */
+export type RpcStrategy = 'rotate' | 'sticky';
+
+/** One `STEEM_RPC_SCHEDULE` window: while the clock is inside it, all load prefers `url`. */
+export interface RpcScheduleWindow {
+  /** Inclusive start: minutes since 00:00 UTC (0..1439). */
+  startMin: number;
+  /** Exclusive end: minutes since 00:00 UTC (1..1440 — `1440` = 24:00). `endMin < startMin` wraps past midnight. */
+  endMin: number;
+  /** Endpoint to pin — validated at config load to be one of the configured endpoints. */
+  url: string;
+}
+
 export interface FailoverOptions {
   timeoutMs?: number;
   /** How long a failing endpoint is taken out of rotation. */
@@ -114,6 +139,10 @@ export interface FailoverOptions {
   logger?: Logger;
   /** Injected for tests. */
   clientFactory?: (url: string) => RpcCaller;
+  /** Endpoint selection policy (default `rotate` — round-robin load division). */
+  strategy?: RpcStrategy;
+  /** Time windows pinning all load to one endpoint (default: none). Failover still applies inside a window. */
+  schedule?: readonly RpcScheduleWindow[];
   /**
    * Blocks within this many heights of the known head are cross-checked against at
    * least one other endpoint before being applied (0 = disabled). Deep-history sync
@@ -179,13 +208,18 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
  */
 export class FailoverRpc implements SteemRpc {
   private readonly endpoints: EndpointState[];
+  /** Last endpoint that answered — the start of rotation in `sticky` mode. */
   private preferred = 0;
+  /** Round-robin cursor: where the next policy-driven request starts (schedule pins leave it alone). */
+  private rrCursor = 0;
   private readonly timeoutMs: number;
   private readonly cooldownMs: number;
   private readonly log: Logger;
   private readonly factory: (url: string) => RpcCaller;
   private readonly quorumDepth: number;
   private readonly now: () => number;
+  private readonly strategy: RpcStrategy;
+  private readonly schedule: readonly RpcScheduleWindow[];
   /** Most recent head height this client observed (set by getHead — the indexer polls it every cycle). */
   private lastHead: { height: number; at: number } | null = null;
 
@@ -197,6 +231,8 @@ export class FailoverRpc implements SteemRpc {
     this.factory = options.clientFactory ?? ((url) => createJsonRpcCaller(url, this.timeoutMs));
     this.quorumDepth = options.quorumDepth ?? 0;
     this.now = options.now ?? Date.now;
+    this.strategy = options.strategy ?? 'rotate';
+    this.schedule = options.schedule ?? [];
     this.endpoints = endpoints.map((url) => ({
       url,
       client: this.factory(url),
@@ -207,7 +243,7 @@ export class FailoverRpc implements SteemRpc {
   }
 
   get endpointsSnapshot(): { url: string; failures: number; coolingDown: boolean; lastError: string | null }[] {
-    const now = Date.now();
+    const now = this.now();
     return this.endpoints.map((e) => ({
       url: e.url,
       failures: e.consecutiveFailures,
@@ -216,15 +252,72 @@ export class FailoverRpc implements SteemRpc {
     }));
   }
 
-  private rotation(): EndpointState[] {
-    const now = Date.now();
+  /** Minutes since midnight UTC at the injected clock's current time. */
+  private minutesNow(): number {
+    const d = new Date(this.now());
+    return d.getUTCHours() * 60 + d.getUTCMinutes();
+  }
+
+  /**
+   * Index of the endpoint the active schedule window pins to, or -1 (no pin).
+   * A pinned endpoint that is currently cooling down does not pin — a window's whole
+   * point is that its load lands somewhere, and the regular policy below then picks
+   * a healthy endpoint (the pinned one is retried once its cooldown expires, so the
+   * window re-forms automatically).
+   */
+  private scheduledIndex(): number {
+    if (this.schedule.length === 0) return -1;
+    const m = this.minutesNow();
+    for (const window of this.schedule) {
+      const inWindow =
+        window.startMin < window.endMin
+          ? m >= window.startMin && m < window.endMin
+          : m >= window.startMin || m < window.endMin;
+      if (!inWindow) continue;
+      const index = this.endpoints.findIndex((e) => e.url === window.url);
+      if (index >= 0 && this.endpoints[index].cooldownUntil <= this.now()) return index;
+    }
+    return -1;
+  }
+
+  /** Where the active strategy would start the next request (no schedule applied). */
+  private policyStart(): number {
+    return this.strategy === 'sticky' ? this.preferred : this.rrCursor;
+  }
+
+  /** Index the next primary request starts at: schedule pin first, then the strategy. */
+  private currentStart(): number {
+    const pin = this.scheduledIndex();
+    return pin >= 0 ? pin : this.policyStart();
+  }
+
+  /**
+   * Candidates for a request that must start at `start`: healthy endpoints first
+   * (every endpoint when all are cooling — total failure still walks the whole list),
+   * rotated so the first element is `start` itself, or the next healthy endpoint
+   * at-or-after `start` when `start` is cooling down.
+   */
+  private orderFrom(start: number): EndpointState[] {
+    const now = this.now();
     const available = this.endpoints.filter((e) => e.cooldownUntil <= now);
     const pool = available.length > 0 ? available : this.endpoints;
+    let base = 0;
+    for (let offset = 0; offset < this.endpoints.length; offset += 1) {
+      const position = pool.indexOf(this.endpoints[(start + offset) % this.endpoints.length]);
+      if (position >= 0) {
+        base = position;
+        break;
+      }
+    }
     const out: EndpointState[] = [];
-    for (let i = 0; i < pool.length; i++) {
-      out.push(pool[(this.preferred + i) % pool.length]);
+    for (let i = 0; i < pool.length; i += 1) {
+      out.push(pool[(base + i) % pool.length]);
     }
     return out;
+  }
+
+  private rotation(): EndpointState[] {
+    return this.orderFrom(this.currentStart());
   }
 
   private markSuccess(endpoint: EndpointState): void {
@@ -239,6 +332,12 @@ export class FailoverRpc implements SteemRpc {
     endpoint.cooldownUntil = 0;
     endpoint.lastError = null;
     this.preferred = this.endpoints.indexOf(endpoint);
+    if (this.strategy === 'rotate') {
+      // Hand the next request to the endpoint after the one that just served — that
+      // is what divides steady-state load across the healthy set (orderFrom skips
+      // cooling members, so a degraded pool stays evenly spread too).
+      this.rrCursor = (this.preferred + 1) % this.endpoints.length;
+    }
   }
 
   private markFailure(endpoint: EndpointState, err: unknown, call: string): void {
@@ -246,7 +345,7 @@ export class FailoverRpc implements SteemRpc {
     const message = err instanceof Error ? err.message : String(err);
     endpoint.lastError = message;
     const backoff = Math.min(this.cooldownMs * 2 ** (endpoint.consecutiveFailures - 1), 5 * 60_000);
-    endpoint.cooldownUntil = Date.now() + backoff;
+    endpoint.cooldownUntil = this.now() + backoff;
     this.log.warn('rpc endpoint failed', {
       endpoint: endpoint.url,
       call,
@@ -268,7 +367,7 @@ export class FailoverRpc implements SteemRpc {
     params?: unknown,
     labelSuffix = '',
   ): Promise<{ value: T; index: number }> {
-    const attempts = this.rotation();
+    const attempts = this.orderFrom(this.currentStart());
     let lastError: unknown = null;
     for (const endpoint of attempts) {
       try {

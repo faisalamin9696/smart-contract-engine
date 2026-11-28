@@ -13,7 +13,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
-      STEEM_RPC_ENDPOINTS: ${STEEM_RPC_ENDPOINTS:-https://api.steemit.com,https://api.steemyy.com,https://api.moecki.online}
+      STEEM_RPC_ENDPOINTS: ${STEEM_RPC_ENDPOINTS:-https://api.steemit.com,https://api.justyy.com,https://api.moecki.online,https://steemd.steemworld.org}
       BLOCK_POLL_INTERVAL_MS: ${BLOCK_POLL_INTERVAL_MS:-3000}
       UNDO_BUFFER_DEPTH: ${UNDO_BUFFER_DEPTH:-30}
       SCE_OP_ID: ${SCE_OP_ID:-sce-mainnet1}

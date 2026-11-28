@@ -42,6 +42,11 @@ function rpcFor(
     quorumDepth: opts.quorumDepth ?? 50,
     timeoutMs: 1_000,
     cooldownMs: 30_000,
+    // Sticky selection keeps every fixture's premise intact: the FIRST endpoint is
+    // always the primary, exactly as when these quorum cases were written. This
+    // suite is about verification, not load division — the default round-robin
+    // policy and schedule pinning are covered in rpcSelection.test.ts.
+    strategy: 'sticky',
     clientFactory: (url) => ({
       call: async (_api: string, method: string): Promise<unknown> => {
         const behavior = behaviors[url];

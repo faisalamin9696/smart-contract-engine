@@ -70,6 +70,8 @@ async function main(): Promise<void> {
     timeoutMs: 15_000,
     cooldownMs: 30_000,
     quorumDepth: config.quorumVerifyDepth,
+    strategy: config.rpcStrategy,
+    schedule: config.rpcSchedule,
     logger,
   });
 
